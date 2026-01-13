@@ -63,8 +63,27 @@ class CLIPTextEncodeBatch:
                 logger.error(f"Error encoding prompt {idx + 1}/{batch_size}: {e}", exc_info=True)
                 raise
         
+        # Find maximum sequence length across all tensors
+        max_seq_len = max(cond.shape[1] for cond in cond_tensors)
+        logger.debug(f"Max sequence length: {max_seq_len}")
+
+        # Pad all tensors to the same sequence length
+        padded_cond_tensors = []
+        for idx, cond in enumerate(cond_tensors):
+            current_seq_len = cond.shape[1]
+            if current_seq_len < max_seq_len:
+                # Pad along dimension 1 (sequence dimension)
+                # torch.nn.functional.pad format: (left, right, top, bottom, front, back)
+                # For 3D tensor [batch, seq, embed]: pad as (0, 0, 0, pad_amount)
+                pad_amount = max_seq_len - current_seq_len
+                padded = torch.nn.functional.pad(cond, (0, 0, 0, pad_amount), mode='constant', value=0)
+                logger.debug(f"Padded tensor {idx} from {current_seq_len} to {max_seq_len}")
+                padded_cond_tensors.append(padded)
+            else:
+                padded_cond_tensors.append(cond)
+
         # Concatenate all conditioning tensors along batch dimension
-        batched_cond = torch.cat(cond_tensors, dim=0)
+        batched_cond = torch.cat(padded_cond_tensors, dim=0)
         batched_pooled = torch.cat(pooled_tensors, dim=0)
         
         logger.info(f"✓ Created batched conditioning: {batched_cond.shape}, pooled: {batched_pooled.shape}")
@@ -148,8 +167,7 @@ class PromptDebugger:
         logger.info(f"Length: {len(text)}")
         
         for idx, item in enumerate(text):
-            preview = str(item)[:100]
-            logger.info(f"  [{idx}] {preview}")
+            logger.info(f"  [{idx}] {item}")
         
         logger.info("=" * 60)
         
