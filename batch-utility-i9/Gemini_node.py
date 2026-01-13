@@ -109,19 +109,28 @@ class GeminiBatchNode:
             try:
                 with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
                     response = model_instance.generate_content(
-                        [prompt, pil_image], 
+                        [prompt, pil_image],
                         generation_config=generation_config
                     )
                 generated_prompt = response.text.strip()
                 prompts.append(generated_prompt)
-                logger.debug(f"Image {idx + 1}/{batch_size}: Generated prompt of length {len(generated_prompt)}")
-                
+
+                # Detailed logging to debug truncation
+                logger.info(f"Image {idx + 1}/{batch_size}:")
+                logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
+                logger.info(f"  First 150 chars: {generated_prompt[:150]}...")
+                logger.info(f"  Last 150 chars: ...{generated_prompt[-150:]}")
+                logger.debug(f"  Full prompt: {generated_prompt}")
+
             except Exception as e:
                 logger.error(f"Error processing image {idx + 1}/{batch_size}: {e}", exc_info=True)
                 # Fallback to a generic prompt to maintain batch size
-                prompts.append(f"Error generating prompt for image {idx + 1}")
-        
+                fallback_prompt = f"Error generating prompt for image {idx + 1}"
+                prompts.append(fallback_prompt)
+                logger.warning(f"Using fallback prompt: {fallback_prompt}")
+
         logger.info(f"Successfully generated {len(prompts)} prompts")
+        logger.info(f"Prompt lengths: {[len(p) for p in prompts]}")
         return (prompts,)
 
 
