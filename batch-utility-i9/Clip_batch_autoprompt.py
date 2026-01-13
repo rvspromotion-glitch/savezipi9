@@ -1,193 +1,168 @@
 import logging
 import torch
-import folder_paths
 
 
-class StringListToString:
+class CLIPTextEncodeBatch:
     """
-    Convert a list of strings from Gemini into individual string outputs.
-    Use this with multiple CLIP Text Encode nodes.
+    Encodes a batch of text prompts using CLIP.
+    Accepts the list output from Ask_Gemini_Batch and creates batched conditioning.
+    Works with any batch size.
     """
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "strings": ("STRING", {"forceInput": True}),
-                "index": ("INT", {"default": 0, "min": 0, "max": 999}),
+                "clip": ("CLIP",),
+                "prompts": ("STRING", {"forceInput": True}),  
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("conditioning",)
+    FUNCTION = "encode_batch"
+
+    CATEGORY = "conditioning"
+
+    def encode_batch(self, clip, prompts):
+        """
+        Encode list of prompts into batched conditioning.
+        This works because OUTPUT_IS_LIST in Gemini node passes Python list directly.
+        """
+        logger = logging.getLogger("CLIPTextEncodeBatch")
+        
+        # Debug what we received
+        logger.info(f"Received prompts - Type: {type(prompts)}")
+        
+        # The prompts come as a Python list directly from the Gemini node
+        # because it uses OUTPUT_IS_LIST = (True,)
+        if not isinstance(prompts, list):
+            logger.warning(f"Expected list, got {type(prompts)}, converting to list")
+            prompts = [prompts]
+        
+        batch_size = len(prompts)
+        logger.info(f"Encoding batch of {batch_size} prompts")
+        
+        # Encode each prompt individually
+        cond_tensors = []
+        pooled_tensors = []
+        
+        for idx, prompt_text in enumerate(prompts):
+            try:
+                # Convert to string in case it's not
+                prompt_str = str(prompt_text)
+                logger.debug(f"[{idx+1}/{batch_size}] Encoding: {prompt_str[:80]}...")
+                
+                tokens = clip.tokenize(prompt_str)
+                cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
+                
+                cond_tensors.append(cond)
+                pooled_tensors.append(pooled)
+                
+            except Exception as e:
+                logger.error(f"Error encoding prompt {idx + 1}/{batch_size}: {e}", exc_info=True)
+                raise
+        
+        # Concatenate all conditioning tensors along batch dimension (dim=0)
+        batched_cond = torch.cat(cond_tensors, dim=0)
+        batched_pooled = torch.cat(pooled_tensors, dim=0)
+        
+        logger.info(f"✓ Created batched conditioning: {batched_cond.shape}, pooled: {batched_pooled.shape}")
+        
+        return ([[batched_cond, {"pooled_output": batched_pooled}]],)
+
+
+class PromptDebugger:
+    """
+    Debug what data structure is actually being passed between nodes.
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompts": ("STRING", {"forceInput": True}),
             }
         }
 
     RETURN_TYPES = ("STRING",)
-    FUNCTION = "get_string"
-    
+    RETURN_NAMES = ("prompts",)
+    FUNCTION = "debug"
+
     CATEGORY = "utils"
 
-    def get_string(self, strings, index):
-        """Get a single string from the list by index."""
-        if isinstance(strings, list):
-            if index < len(strings):
-                return (strings[index],)
-            else:
-                return (f"Index {index} out of range (list has {len(strings)} items)",)
-        return (str(strings),)
+    def debug(self, prompts):
+        """Print detailed information about the prompts."""
+        logger = logging.getLogger("PromptDebugger")
+        
+        logger.info("=" * 60)
+        logger.info("PROMPT DEBUGGER")
+        logger.info("=" * 60)
+        logger.info(f"Type: {type(prompts)}")
+        logger.info(f"Is list: {isinstance(prompts, list)}")
+        
+        if isinstance(prompts, list):
+            logger.info(f"Length: {len(prompts)}")
+            for idx, item in enumerate(prompts):
+                logger.info(f"  [{idx}] Type: {type(item)}, Value: {str(item)[:100]}")
+        else:
+            logger.info(f"Value: {str(prompts)[:200]}")
+        
+        logger.info("=" * 60)
+        
+        # Pass through unchanged
+        return (prompts,)
 
 
-class CLIPTextEncodeMultiple:
+class BatchSizeChecker:
     """
-    Encode multiple text prompts at once.
-    This is designed to work with the Gemini batch output.
-    """
-    
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "clip": ("CLIP",),
-            },
-            "optional": {
-                "text_1": ("STRING", {"multiline": True, "dynamicPrompts": False, "forceInput": True}),
-                "text_2": ("STRING", {"multiline": True, "dynamicPrompts": False, "forceInput": True}),
-                "text_3": ("STRING", {"multiline": True, "dynamicPrompts": False, "forceInput": True}),
-                "text_4": ("STRING", {"multiline": True, "dynamicPrompts": False, "forceInput": True}),
-            }
-        }
-
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "CONDITIONING", "CONDITIONING")
-    RETURN_NAMES = ("cond_1", "cond_2", "cond_3", "cond_4")
-    FUNCTION = "encode"
-    
-    CATEGORY = "conditioning"
-
-    def encode(self, clip, text_1=None, text_2=None, text_3=None, text_4=None):
-        """Encode up to 4 texts."""
-        results = []
-        for text in [text_1, text_2, text_3, text_4]:
-            if text:
-                tokens = clip.tokenize(text)
-                cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
-                results.append([[cond, {"pooled_output": pooled}]])
-            else:
-                # Return empty conditioning if not provided
-                results.append(None)
-        return tuple(results)
-
-
-class ConditioningConcat:
-    """
-    Concatenate multiple conditioning tensors along the batch dimension.
-    This creates a batched conditioning from separate inputs.
+    Verify batch sizes match between images and prompts.
     """
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "conditioning_1": ("CONDITIONING",),
-            },
-            "optional": {
-                "conditioning_2": ("CONDITIONING",),
-                "conditioning_3": ("CONDITIONING",),
-                "conditioning_4": ("CONDITIONING",),
-                "conditioning_5": ("CONDITIONING",),
-                "conditioning_6": ("CONDITIONING",),
-                "conditioning_7": ("CONDITIONING",),
-                "conditioning_8": ("CONDITIONING",),
+                "images": ("IMAGE",),
+                "prompts": ("STRING", {"forceInput": True}),
             }
         }
 
-    RETURN_TYPES = ("CONDITIONING",)
-    FUNCTION = "concat"
-    
-    CATEGORY = "conditioning"
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING")
+    RETURN_NAMES = ("images", "prompts", "info")
+    FUNCTION = "check"
 
-    def concat(self, conditioning_1, conditioning_2=None, conditioning_3=None, conditioning_4=None,
-               conditioning_5=None, conditioning_6=None, conditioning_7=None, conditioning_8=None):
-        """Concatenate conditioning tensors into a batch."""
-        logger = logging.getLogger("ConditioningConcat")
-        
-        conditionings = [conditioning_1]
-        for cond in [conditioning_2, conditioning_3, conditioning_4, conditioning_5, 
-                     conditioning_6, conditioning_7, conditioning_8]:
-            if cond is not None:
-                conditionings.append(cond)
-        
-        # Extract tensors
-        cond_tensors = []
-        pooled_tensors = []
-        
-        for cond in conditionings:
-            cond_tensors.append(cond[0][0])
-            pooled_tensors.append(cond[0][1]["pooled_output"])
-        
-        # Concatenate along batch dimension
-        batched_cond = torch.cat(cond_tensors, dim=0)
-        batched_pooled = torch.cat(pooled_tensors, dim=0)
-        
-        logger.info(f"Concatenated {len(conditionings)} conditionings into batch: {batched_cond.shape}")
-        
-        return ([[batched_cond, {"pooled_output": batched_pooled}]],)
+    CATEGORY = "utils"
 
-
-class PromptListProcessor:
-    """
-    Takes the list output from Gemini and properly formats it for CLIP encoding.
-    """
-    
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "clip": ("CLIP",),
-                "prompt_list": ("STRING", {"forceInput": True}),
-            }
-        }
-
-    RETURN_TYPES = ("CONDITIONING",)
-    FUNCTION = "process"
-    
-    CATEGORY = "conditioning"
-
-    def process(self, clip, prompt_list):
-        """Process list of prompts into batched conditioning."""
-        logger = logging.getLogger("PromptListProcessor")
+    def check(self, images, prompts):
+        """Check and report batch sizes."""
+        logger = logging.getLogger("BatchSizeChecker")
         
-        # Handle list input
-        if not isinstance(prompt_list, list):
-            prompt_list = [prompt_list]
+        image_count = images.shape[0] if hasattr(images, 'shape') else len(images)
         
-        logger.info(f"Processing {len(prompt_list)} prompts")
-        logger.debug(f"First prompt preview: {str(prompt_list[0])[:100]}")
+        if isinstance(prompts, list):
+            prompt_count = len(prompts)
+        else:
+            prompt_count = 1
         
-        # Encode each prompt
-        cond_tensors = []
-        pooled_tensors = []
+        info = f"Images: {image_count}, Prompts: {prompt_count}"
         
-        for idx, prompt in enumerate(prompt_list):
-            tokens = clip.tokenize(str(prompt))
-            cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
-            cond_tensors.append(cond)
-            pooled_tensors.append(pooled)
+        if image_count == prompt_count:
+            logger.info(f"✓ Batch sizes match: {info}")
+        else:
+            logger.warning(f"✗ Batch size MISMATCH: {info}")
         
-        # Batch them
-        batched_cond = torch.cat(cond_tensors, dim=0)
-        batched_pooled = torch.cat(pooled_tensors, dim=0)
-        
-        logger.info(f"Created conditioning batch: {batched_cond.shape}")
-        
-        return ([[batched_cond, {"pooled_output": batched_pooled}]],)
+        return (images, prompts, info)
 
 
 NODE_CLASS_MAPPINGS = {
-    "StringListToString": StringListToString,
-    "CLIPTextEncodeMultiple": CLIPTextEncodeMultiple,
-    "ConditioningConcat": ConditioningConcat,
-    "PromptListProcessor": PromptListProcessor,
+    "CLIPTextEncodeBatch": CLIPTextEncodeBatch,
+    "PromptDebugger": PromptDebugger,
+    "BatchSizeChecker": BatchSizeChecker,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "StringListToString": "String List to String",
-    "CLIPTextEncodeMultiple": "CLIP Text Encode (Multiple)",
-    "ConditioningConcat": "Conditioning Concat (Batch)",
-    "PromptListProcessor": "Prompt List to Conditioning",
+    "CLIPTextEncodeBatch": "CLIP Text Encode (Batch)",
+    "PromptDebugger": "Prompt Debugger",
+    "BatchSizeChecker": "Batch Size Checker",
 }
