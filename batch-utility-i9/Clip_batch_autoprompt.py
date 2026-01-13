@@ -50,18 +50,46 @@ class CLIPTextEncodeBatch:
         
         for idx, prompt_text in enumerate(prompts):
             try:
-                logger.debug(f"[{idx+1}/{batch_size}] Encoding prompt...")
-                
+                logger.debug(f"[{idx+1}/{batch_size}] Encoding prompt (length: {len(prompt_text)} chars)...")
+
+                # Validate prompt
+                if not prompt_text or not prompt_text.strip():
+                    logger.warning(f"Prompt {idx+1} is empty or whitespace only. Using fallback.")
+                    prompt_text = "empty prompt"
+
                 tokens = clip_model.tokenize(prompt_text)
+                logger.debug(f"[{idx+1}/{batch_size}] Tokenized successfully")
+
                 cond, pooled = clip_model.encode_from_tokens(tokens, return_pooled=True)
-                
+
+                # Critical validation: ensure we got valid tensors
+                if cond is None:
+                    raise ValueError(f"CLIP returned None for cond tensor (prompt {idx+1})")
+                if pooled is None:
+                    raise ValueError(f"CLIP returned None for pooled tensor (prompt {idx+1})")
+
+                logger.debug(f"[{idx+1}/{batch_size}] Encoded: cond shape={cond.shape}, pooled shape={pooled.shape}")
+
                 cond_tensors.append(cond)
                 pooled_tensors.append(pooled)
-                
+
             except Exception as e:
                 logger.error(f"Error encoding prompt {idx + 1}/{batch_size}: {e}", exc_info=True)
+                logger.error(f"Problematic prompt: {repr(prompt_text)}")
                 raise
         
+        # Validate we have tensors before processing
+        if not cond_tensors or not pooled_tensors:
+            raise RuntimeError("No valid conditioning tensors were created")
+
+        if len(cond_tensors) != len(pooled_tensors):
+            raise RuntimeError(f"Mismatch: {len(cond_tensors)} cond tensors but {len(pooled_tensors)} pooled tensors")
+
+        # Verify no None values slipped through
+        for idx, (cond, pooled) in enumerate(zip(cond_tensors, pooled_tensors)):
+            if cond is None or pooled is None:
+                raise RuntimeError(f"None tensor found at index {idx}: cond={cond}, pooled={pooled}")
+
         # Find maximum sequence length across all tensors
         max_seq_len = max(cond.shape[1] for cond in cond_tensors)
         logger.debug(f"Max sequence length: {max_seq_len}")
@@ -82,6 +110,7 @@ class CLIPTextEncodeBatch:
                 padded_cond_tensors.append(cond)
 
         # Concatenate all conditioning tensors along batch dimension
+        logger.debug(f"Concatenating {len(padded_cond_tensors)} cond tensors and {len(pooled_tensors)} pooled tensors")
         batched_cond = torch.cat(padded_cond_tensors, dim=0)
         batched_pooled = torch.cat(pooled_tensors, dim=0)
         
