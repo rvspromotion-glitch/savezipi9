@@ -13,7 +13,7 @@ class CLIPTextEncodeBatch:
         return {
             "required": {
                 "clip": ("CLIP",),
-                "text": ("STRING", {"forceInput": True}),  
+                "prompts": ("STRING", {"forceInput": True}),
             }
         }
 
@@ -25,21 +25,20 @@ class CLIPTextEncodeBatch:
 
     CATEGORY = "conditioning"
 
-    def encode_batch(self, clip, text):
+    def encode_batch(self, clip, prompts):
         """
         Encode list of prompts into batched conditioning.
-        
+
         Args:
             clip: List with single CLIP model [clip_model]
-            text: List of prompt strings ["prompt1", "prompt2", ...]
+            prompts: List of prompt strings ["prompt1", "prompt2", ...]
         """
         logger = logging.getLogger("CLIPTextEncodeBatch")
-        
+
         # Extract CLIP model from list (INPUT_IS_LIST wraps everything)
         clip_model = clip[0]
-        
-        # text is already a list of strings
-        prompts = text
+
+        # prompts is already a list of strings
         batch_size = len(prompts)
         
         logger.info(f"Encoding batch of {batch_size} prompts")
@@ -51,18 +50,46 @@ class CLIPTextEncodeBatch:
         
         for idx, prompt_text in enumerate(prompts):
             try:
-                logger.debug(f"[{idx+1}/{batch_size}] Encoding prompt...")
-                
+                logger.debug(f"[{idx+1}/{batch_size}] Encoding prompt (length: {len(prompt_text)} chars)...")
+
+                # Validate prompt
+                if not prompt_text or not prompt_text.strip():
+                    logger.warning(f"Prompt {idx+1} is empty or whitespace only. Using fallback.")
+                    prompt_text = "empty prompt"
+
                 tokens = clip_model.tokenize(prompt_text)
+                logger.debug(f"[{idx+1}/{batch_size}] Tokenized successfully")
+
                 cond, pooled = clip_model.encode_from_tokens(tokens, return_pooled=True)
-                
+
+                # Critical validation: ensure we got valid tensors
+                if cond is None:
+                    raise ValueError(f"CLIP returned None for cond tensor (prompt {idx+1})")
+                if pooled is None:
+                    raise ValueError(f"CLIP returned None for pooled tensor (prompt {idx+1})")
+
+                logger.debug(f"[{idx+1}/{batch_size}] Encoded: cond shape={cond.shape}, pooled shape={pooled.shape}")
+
                 cond_tensors.append(cond)
                 pooled_tensors.append(pooled)
-                
+
             except Exception as e:
                 logger.error(f"Error encoding prompt {idx + 1}/{batch_size}: {e}", exc_info=True)
+                logger.error(f"Problematic prompt: {repr(prompt_text)}")
                 raise
         
+        # Validate we have tensors before processing
+        if not cond_tensors or not pooled_tensors:
+            raise RuntimeError("No valid conditioning tensors were created")
+
+        if len(cond_tensors) != len(pooled_tensors):
+            raise RuntimeError(f"Mismatch: {len(cond_tensors)} cond tensors but {len(pooled_tensors)} pooled tensors")
+
+        # Verify no None values slipped through
+        for idx, (cond, pooled) in enumerate(zip(cond_tensors, pooled_tensors)):
+            if cond is None or pooled is None:
+                raise RuntimeError(f"None tensor found at index {idx}: cond={cond}, pooled={pooled}")
+
         # Find maximum sequence length across all tensors
         max_seq_len = max(cond.shape[1] for cond in cond_tensors)
         logger.debug(f"Max sequence length: {max_seq_len}")
@@ -83,6 +110,7 @@ class CLIPTextEncodeBatch:
                 padded_cond_tensors.append(cond)
 
         # Concatenate all conditioning tensors along batch dimension
+        logger.debug(f"Concatenating {len(padded_cond_tensors)} cond tensors and {len(pooled_tensors)} pooled tensors")
         batched_cond = torch.cat(padded_cond_tensors, dim=0)
         batched_pooled = torch.cat(pooled_tensors, dim=0)
         
@@ -102,7 +130,7 @@ class CLIPTextEncodeSequence:
         return {
             "required": {
                 "clip": ("CLIP",),
-                "text": ("STRING", {"forceInput": True}),
+                "prompts": ("STRING", {"forceInput": True}),
             }
         }
 
@@ -114,12 +142,11 @@ class CLIPTextEncodeSequence:
 
     CATEGORY = "conditioning"
 
-    def encode_sequence(self, clip, text):
+    def encode_sequence(self, clip, prompts):
         """Encode each prompt, return as list of separate conditionings."""
         logger = logging.getLogger("CLIPTextEncodeSequence")
-        
+
         clip_model = clip[0]
-        prompts = text
         
         logger.info(f"Encoding {len(prompts)} prompts as sequence")
         
@@ -143,36 +170,42 @@ class PromptDebugger:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "text": ("STRING", {"forceInput": True}),
+                "prompts": ("STRING", {"forceInput": True}),
             }
         }
 
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("text",)
+    RETURN_NAMES = ("prompts",)
     FUNCTION = "debug"
     INPUT_IS_LIST = True
     OUTPUT_IS_LIST = (True,)
 
     CATEGORY = "utils"
 
-    def debug(self, text):
+    def debug(self, prompts):
         """Print detailed information about received data."""
         logger = logging.getLogger("PromptDebugger")
-        
+
         logger.info("=" * 60)
         logger.info("PROMPT DEBUGGER (with INPUT_IS_LIST)")
         logger.info("=" * 60)
-        logger.info(f"Received type: {type(text)}")
-        logger.info(f"Is list: {isinstance(text, list)}")
-        logger.info(f"Length: {len(text)}")
-        
-        for idx, item in enumerate(text):
-            logger.info(f"  [{idx}] {item}")
-        
+        logger.info(f"Received type: {type(prompts)}")
+        logger.info(f"Is list: {isinstance(prompts, list)}")
+        logger.info(f"Count: {len(prompts)}")
+        logger.info("")
+
+        for idx, item in enumerate(prompts):
+            item_str = str(item)
+            logger.info(f"Prompt [{idx}]:")
+            logger.info(f"  Length: {len(item_str)} characters")
+            logger.info(f"  Preview: {item_str[:100]}{'...' if len(item_str) > 100 else ''}")
+            logger.info(f"  Full text: {item_str}")
+            logger.info("")
+
         logger.info("=" * 60)
-        
+
         # Pass through unchanged
-        return (text,)
+        return (prompts,)
 
 
 class BatchSizeChecker:
@@ -185,33 +218,33 @@ class BatchSizeChecker:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "text": ("STRING", {"forceInput": True}),
+                "prompts": ("STRING", {"forceInput": True}),
             }
         }
 
     RETURN_TYPES = ("IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("images", "text", "info")
+    RETURN_NAMES = ("images", "prompts", "info")
     FUNCTION = "check"
-    INPUT_IS_LIST = (False, True)  # images: single, text: list
+    INPUT_IS_LIST = (False, True)  # images: single, prompts: list
     OUTPUT_IS_LIST = (False, True, False)
 
     CATEGORY = "utils"
 
-    def check(self, images, text):
+    def check(self, images, prompts):
         """Check batch sizes."""
         logger = logging.getLogger("BatchSizeChecker")
-        
+
         image_count = images.shape[0]
-        prompt_count = len(text)
-        
+        prompt_count = len(prompts)
+
         info = f"Images: {image_count}, Prompts: {prompt_count}"
-        
+
         if image_count == prompt_count:
             logger.info(f"✓ Batch sizes MATCH: {info}")
         else:
             logger.warning(f"✗ Batch size MISMATCH: {info}")
-        
-        return (images, text, info)
+
+        return (images, prompts, info)
 
 
 NODE_CLASS_MAPPINGS = {
