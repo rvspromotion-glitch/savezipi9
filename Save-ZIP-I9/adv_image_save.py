@@ -35,8 +35,20 @@ class AdvancedImageSave:
 
     def save_images(self, images, filename_prefix="ComfyUI", prompt=None, extra_pnginfo=None):
         filename_prefix += self.prefix_append
+        
+        # Handle tensor properly
+        if hasattr(images, 'shape'):
+            batch_size = images.shape[0]
+            height = images.shape[1]
+            width = images.shape[2]
+        else:
+            # Fallback if images is a list
+            batch_size = len(images)
+            height = images[0].shape[0] if hasattr(images[0], 'shape') else images[0].size[1]
+            width = images[0].shape[1] if hasattr(images[0], 'shape') else images[0].size[0]
+        
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
-            filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0]
+            filename_prefix, self.output_dir, width, height
         )
         
         results = list()
