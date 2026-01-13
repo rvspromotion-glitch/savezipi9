@@ -72,15 +72,27 @@ class CLIPTextEncodeBatch:
                         result = clip_model.encode(prompt_text)
                         logger.debug(f"[{idx+1}/{batch_size}] encode() returned: {type(result)}")
 
-                        # result is typically [[cond, {"pooled_output": pooled}]]
-                        if isinstance(result, list) and len(result) > 0:
+                        # Handle different return types
+                        if torch.is_tensor(result):
+                            # encode() returns conditioning tensor directly
+                            logger.debug(f"[{idx+1}/{batch_size}] encode() returned raw tensor, shape: {result.shape}")
+                            cond = result
+                            # For models without pooled output, create zero tensor or None
+                            # We'll try to get pooled from encode_from_tokens as fallback
+                            pooled = None
+                            method_1_failed = True  # Signal we need to get pooled separately
+
+                        elif isinstance(result, list) and len(result) > 0:
+                            # encode() returns full conditioning format [[cond, {"pooled_output": pooled}]]
                             if isinstance(result[0], list) and len(result[0]) == 2:
                                 cond = result[0][0]
                                 pooled = result[0][1].get("pooled_output") if isinstance(result[0][1], dict) else None
+                                logger.debug(f"[{idx+1}/{batch_size}] Extracted from list format: cond shape={cond.shape}, pooled={type(pooled)}")
                             else:
                                 raise ValueError(f"Unexpected encode() return structure: {result}")
                         else:
                             raise ValueError(f"Unexpected encode() return type: {type(result)}")
+
                     except Exception as e:
                         logger.warning(f"[{idx+1}/{batch_size}] clip.encode() failed: {e}, trying encode_from_tokens")
                         method_1_failed = True
@@ -89,28 +101,55 @@ class CLIPTextEncodeBatch:
                 else:
                     method_1_failed = True
 
-                # Method 2: Fallback to tokenize + encode_from_tokens
-                if method_1_failed:
+                # Method 2: Use tokenize + encode_from_tokens (either as primary or to get pooled)
+                if method_1_failed or pooled is None:
                     logger.debug(f"[{idx+1}/{batch_size}] Using tokenize + encode_from_tokens method")
                     tokens = clip_model.tokenize(prompt_text)
                     logger.debug(f"[{idx+1}/{batch_size}] Tokenized successfully, tokens type: {type(tokens)}")
 
-                    result = clip_model.encode_from_tokens(tokens, return_pooled=True)
-                    logger.debug(f"[{idx+1}/{batch_size}] encode_from_tokens returned: type={type(result)}")
+                    # Try with return_pooled=True first
+                    try:
+                        result = clip_model.encode_from_tokens(tokens, return_pooled=True)
+                        logger.debug(f"[{idx+1}/{batch_size}] encode_from_tokens(return_pooled=True) returned: type={type(result)}")
 
-                    # Unpack the result
-                    if isinstance(result, tuple) and len(result) == 2:
-                        cond, pooled = result
-                        logger.debug(f"[{idx+1}/{batch_size}] Unpacked: cond type={type(cond)}, pooled type={type(pooled)}")
-                    else:
-                        logger.error(f"[{idx+1}/{batch_size}] Unexpected return format from encode_from_tokens: {result}")
-                        raise ValueError(f"encode_from_tokens returned unexpected format: {type(result)}")
+                        if isinstance(result, tuple) and len(result) == 2:
+                            result_cond, result_pooled = result
+                            logger.debug(f"[{idx+1}/{batch_size}] Unpacked: cond type={type(result_cond)}, pooled type={type(result_pooled)}")
 
-                # Critical validation: ensure we got valid tensors
+                            # Use these if we don't have them from Method 1
+                            if cond is None:
+                                cond = result_cond
+                            if pooled is None and result_pooled is not None:
+                                pooled = result_pooled
+                        else:
+                            logger.warning(f"[{idx+1}/{batch_size}] Unexpected return format, trying without return_pooled")
+                            raise ValueError("Force fallback")
+
+                    except Exception as e:
+                        logger.debug(f"[{idx+1}/{batch_size}] return_pooled=True failed: {e}, trying without")
+                        # Fallback: try without return_pooled
+                        result = clip_model.encode_from_tokens(tokens, return_pooled=False)
+                        logger.debug(f"[{idx+1}/{batch_size}] encode_from_tokens(return_pooled=False) returned: type={type(result)}")
+
+                        if cond is None:
+                            if torch.is_tensor(result):
+                                cond = result
+                            elif isinstance(result, tuple):
+                                cond = result[0]
+                            else:
+                                cond = result
+
+                # Final validation and fallback for pooled
                 if cond is None:
-                    raise ValueError(f"CLIP returned None for cond tensor (prompt {idx+1})")
+                    raise ValueError(f"Failed to get conditioning tensor for prompt {idx+1}")
+
                 if pooled is None:
-                    raise ValueError(f"CLIP returned None for pooled tensor (prompt {idx+1})")
+                    # Create zero pooled tensor as fallback
+                    logger.warning(f"[{idx+1}/{batch_size}] No pooled output available, creating zero tensor")
+                    # Typically pooled is [batch_size, hidden_dim], use same hidden dim as cond
+                    hidden_dim = cond.shape[-1] if len(cond.shape) >= 2 else 768
+                    pooled = torch.zeros((cond.shape[0], hidden_dim), dtype=cond.dtype, device=cond.device)
+                    logger.debug(f"[{idx+1}/{batch_size}] Created zero pooled tensor: shape={pooled.shape}")
 
                 logger.debug(f"[{idx+1}/{batch_size}] Encoded: cond shape={cond.shape}, pooled shape={pooled.shape}")
 
