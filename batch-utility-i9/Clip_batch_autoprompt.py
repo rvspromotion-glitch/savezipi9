@@ -38,6 +38,10 @@ class CLIPTextEncodeBatch:
         # Extract CLIP model from list (INPUT_IS_LIST wraps everything)
         clip_model = clip[0]
 
+        # Debug the CLIP object
+        logger.info(f"CLIP object type: {type(clip_model)}")
+        logger.info(f"CLIP object methods: {[m for m in dir(clip_model) if not m.startswith('_')]}")
+
         # prompts is already a list of strings
         batch_size = len(prompts)
         
@@ -57,10 +61,50 @@ class CLIPTextEncodeBatch:
                     logger.warning(f"Prompt {idx+1} is empty or whitespace only. Using fallback.")
                     prompt_text = "empty prompt"
 
-                tokens = clip_model.tokenize(prompt_text)
-                logger.debug(f"[{idx+1}/{batch_size}] Tokenized successfully")
+                cond = None
+                pooled = None
+                method_1_failed = False
 
-                cond, pooled = clip_model.encode_from_tokens(tokens, return_pooled=True)
+                # Method 1: Try direct encode method first
+                if hasattr(clip_model, 'encode') and callable(getattr(clip_model, 'encode')):
+                    logger.debug(f"[{idx+1}/{batch_size}] Using clip.encode() method")
+                    try:
+                        result = clip_model.encode(prompt_text)
+                        logger.debug(f"[{idx+1}/{batch_size}] encode() returned: {type(result)}")
+
+                        # result is typically [[cond, {"pooled_output": pooled}]]
+                        if isinstance(result, list) and len(result) > 0:
+                            if isinstance(result[0], list) and len(result[0]) == 2:
+                                cond = result[0][0]
+                                pooled = result[0][1].get("pooled_output") if isinstance(result[0][1], dict) else None
+                            else:
+                                raise ValueError(f"Unexpected encode() return structure: {result}")
+                        else:
+                            raise ValueError(f"Unexpected encode() return type: {type(result)}")
+                    except Exception as e:
+                        logger.warning(f"[{idx+1}/{batch_size}] clip.encode() failed: {e}, trying encode_from_tokens")
+                        method_1_failed = True
+                        cond = None
+                        pooled = None
+                else:
+                    method_1_failed = True
+
+                # Method 2: Fallback to tokenize + encode_from_tokens
+                if method_1_failed:
+                    logger.debug(f"[{idx+1}/{batch_size}] Using tokenize + encode_from_tokens method")
+                    tokens = clip_model.tokenize(prompt_text)
+                    logger.debug(f"[{idx+1}/{batch_size}] Tokenized successfully, tokens type: {type(tokens)}")
+
+                    result = clip_model.encode_from_tokens(tokens, return_pooled=True)
+                    logger.debug(f"[{idx+1}/{batch_size}] encode_from_tokens returned: type={type(result)}")
+
+                    # Unpack the result
+                    if isinstance(result, tuple) and len(result) == 2:
+                        cond, pooled = result
+                        logger.debug(f"[{idx+1}/{batch_size}] Unpacked: cond type={type(cond)}, pooled type={type(pooled)}")
+                    else:
+                        logger.error(f"[{idx+1}/{batch_size}] Unexpected return format from encode_from_tokens: {result}")
+                        raise ValueError(f"encode_from_tokens returned unexpected format: {type(result)}")
 
                 # Critical validation: ensure we got valid tensors
                 if cond is None:
