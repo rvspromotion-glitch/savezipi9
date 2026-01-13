@@ -5,8 +5,7 @@ import torch
 class CLIPTextEncodeBatch:
     """
     Encodes a batch of text prompts using CLIP.
-    Accepts the list output from Ask_Gemini_Batch and creates batched conditioning.
-    Works with any batch size.
+    Uses INPUT_IS_LIST to receive all prompts at once, not one at a time.
     """
     
     @classmethod
@@ -14,34 +13,37 @@ class CLIPTextEncodeBatch:
         return {
             "required": {
                 "clip": ("CLIP",),
-                "prompts": ("STRING", {"forceInput": True}),  
+                "text": ("STRING", {"forceInput": True}),  
             }
         }
 
     RETURN_TYPES = ("CONDITIONING",)
     RETURN_NAMES = ("conditioning",)
     FUNCTION = "encode_batch"
+    INPUT_IS_LIST = True  # Critical: receive ALL prompts at once
+    OUTPUT_IS_LIST = (False,)  # Output single batched conditioning
 
     CATEGORY = "conditioning"
 
-    def encode_batch(self, clip, prompts):
+    def encode_batch(self, clip, text):
         """
         Encode list of prompts into batched conditioning.
-        This works because OUTPUT_IS_LIST in Gemini node passes Python list directly.
+        
+        Args:
+            clip: List with single CLIP model [clip_model]
+            text: List of prompt strings ["prompt1", "prompt2", ...]
         """
         logger = logging.getLogger("CLIPTextEncodeBatch")
         
-        # Debug what we received
-        logger.info(f"Received prompts - Type: {type(prompts)}")
+        # Extract CLIP model from list (INPUT_IS_LIST wraps everything)
+        clip_model = clip[0]
         
-        # The prompts come as a Python list directly from the Gemini node
-        # because it uses OUTPUT_IS_LIST = (True,)
-        if not isinstance(prompts, list):
-            logger.warning(f"Expected list, got {type(prompts)}, converting to list")
-            prompts = [prompts]
-        
+        # text is already a list of strings
+        prompts = text
         batch_size = len(prompts)
+        
         logger.info(f"Encoding batch of {batch_size} prompts")
+        logger.debug(f"First prompt: {prompts[0][:80]}...")
         
         # Encode each prompt individually
         cond_tensors = []
@@ -49,12 +51,10 @@ class CLIPTextEncodeBatch:
         
         for idx, prompt_text in enumerate(prompts):
             try:
-                # Convert to string in case it's not
-                prompt_str = str(prompt_text)
-                logger.debug(f"[{idx+1}/{batch_size}] Encoding: {prompt_str[:80]}...")
+                logger.debug(f"[{idx+1}/{batch_size}] Encoding prompt...")
                 
-                tokens = clip.tokenize(prompt_str)
-                cond, pooled = clip.encode_from_tokens(tokens, return_pooled=True)
+                tokens = clip_model.tokenize(prompt_text)
+                cond, pooled = clip_model.encode_from_tokens(tokens, return_pooled=True)
                 
                 cond_tensors.append(cond)
                 pooled_tensors.append(pooled)
@@ -63,7 +63,7 @@ class CLIPTextEncodeBatch:
                 logger.error(f"Error encoding prompt {idx + 1}/{batch_size}: {e}", exc_info=True)
                 raise
         
-        # Concatenate all conditioning tensors along batch dimension (dim=0)
+        # Concatenate all conditioning tensors along batch dimension
         batched_cond = torch.cat(cond_tensors, dim=0)
         batched_pooled = torch.cat(pooled_tensors, dim=0)
         
@@ -72,51 +72,94 @@ class CLIPTextEncodeBatch:
         return ([[batched_cond, {"pooled_output": batched_pooled}]],)
 
 
-class PromptDebugger:
+class CLIPTextEncodeSequence:
     """
-    Debug what data structure is actually being passed between nodes.
+    Alternative: Encode batch of prompts, output as separate conditionings.
+    Use this if you want to process each conditioning separately downstream.
     """
     
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompts": ("STRING", {"forceInput": True}),
+                "clip": ("CLIP",),
+                "text": ("STRING", {"forceInput": True}),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("conditioning",)
+    FUNCTION = "encode_sequence"
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True,)  # Output list of individual conditionings
+
+    CATEGORY = "conditioning"
+
+    def encode_sequence(self, clip, text):
+        """Encode each prompt, return as list of separate conditionings."""
+        logger = logging.getLogger("CLIPTextEncodeSequence")
+        
+        clip_model = clip[0]
+        prompts = text
+        
+        logger.info(f"Encoding {len(prompts)} prompts as sequence")
+        
+        conditionings = []
+        for idx, prompt_text in enumerate(prompts):
+            tokens = clip_model.tokenize(prompt_text)
+            cond, pooled = clip_model.encode_from_tokens(tokens, return_pooled=True)
+            conditionings.append([[cond, {"pooled_output": pooled}]])
+        
+        logger.info(f"✓ Created {len(conditionings)} separate conditionings")
+        return (conditionings,)
+
+
+class PromptDebugger:
+    """
+    Debug what data structure is being passed.
+    Also uses INPUT_IS_LIST to see everything at once.
+    """
+    
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"forceInput": True}),
             }
         }
 
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("prompts",)
+    RETURN_NAMES = ("text",)
     FUNCTION = "debug"
+    INPUT_IS_LIST = True
+    OUTPUT_IS_LIST = (True,)
 
     CATEGORY = "utils"
 
-    def debug(self, prompts):
-        """Print detailed information about the prompts."""
+    def debug(self, text):
+        """Print detailed information about received data."""
         logger = logging.getLogger("PromptDebugger")
         
         logger.info("=" * 60)
-        logger.info("PROMPT DEBUGGER")
+        logger.info("PROMPT DEBUGGER (with INPUT_IS_LIST)")
         logger.info("=" * 60)
-        logger.info(f"Type: {type(prompts)}")
-        logger.info(f"Is list: {isinstance(prompts, list)}")
+        logger.info(f"Received type: {type(text)}")
+        logger.info(f"Is list: {isinstance(text, list)}")
+        logger.info(f"Length: {len(text)}")
         
-        if isinstance(prompts, list):
-            logger.info(f"Length: {len(prompts)}")
-            for idx, item in enumerate(prompts):
-                logger.info(f"  [{idx}] Type: {type(item)}, Value: {str(item)[:100]}")
-        else:
-            logger.info(f"Value: {str(prompts)[:200]}")
+        for idx, item in enumerate(text):
+            preview = str(item)[:100]
+            logger.info(f"  [{idx}] {preview}")
         
         logger.info("=" * 60)
         
         # Pass through unchanged
-        return (prompts,)
+        return (text,)
 
 
 class BatchSizeChecker:
     """
-    Verify batch sizes match between images and prompts.
+    Verify batch sizes match.
     """
     
     @classmethod
@@ -124,45 +167,45 @@ class BatchSizeChecker:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "prompts": ("STRING", {"forceInput": True}),
+                "text": ("STRING", {"forceInput": True}),
             }
         }
 
     RETURN_TYPES = ("IMAGE", "STRING", "STRING")
-    RETURN_NAMES = ("images", "prompts", "info")
+    RETURN_NAMES = ("images", "text", "info")
     FUNCTION = "check"
+    INPUT_IS_LIST = (False, True)  # images: single, text: list
+    OUTPUT_IS_LIST = (False, True, False)
 
     CATEGORY = "utils"
 
-    def check(self, images, prompts):
-        """Check and report batch sizes."""
+    def check(self, images, text):
+        """Check batch sizes."""
         logger = logging.getLogger("BatchSizeChecker")
         
-        image_count = images.shape[0] if hasattr(images, 'shape') else len(images)
-        
-        if isinstance(prompts, list):
-            prompt_count = len(prompts)
-        else:
-            prompt_count = 1
+        image_count = images.shape[0]
+        prompt_count = len(text)
         
         info = f"Images: {image_count}, Prompts: {prompt_count}"
         
         if image_count == prompt_count:
-            logger.info(f"✓ Batch sizes match: {info}")
+            logger.info(f"✓ Batch sizes MATCH: {info}")
         else:
             logger.warning(f"✗ Batch size MISMATCH: {info}")
         
-        return (images, prompts, info)
+        return (images, text, info)
 
 
 NODE_CLASS_MAPPINGS = {
     "CLIPTextEncodeBatch": CLIPTextEncodeBatch,
+    "CLIPTextEncodeSequence": CLIPTextEncodeSequence,
     "PromptDebugger": PromptDebugger,
     "BatchSizeChecker": BatchSizeChecker,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CLIPTextEncodeBatch": "CLIP Text Encode (Batch)",
+    "CLIPTextEncodeSequence": "CLIP Text Encode (Sequence)",
     "PromptDebugger": "Prompt Debugger",
     "BatchSizeChecker": "Batch Size Checker",
 }
