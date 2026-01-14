@@ -187,34 +187,30 @@ class CLIPTextEncodeBatch:
             if cond is None or pooled is None:
                 raise RuntimeError(f"None tensor found at index {idx}: cond={cond}, pooled={pooled}")
 
-        # Get token counts for each conditioning
-        num_tokens = [cond.shape[1] for cond in cond_tensors]
-        logger.debug(f"Token counts: {num_tokens}")
+        # Find maximum sequence length - pad to this (simple and efficient)
+        max_seq_len = max(cond.shape[1] for cond in cond_tensors)
+        logger.info(f"Max sequence length: {max_seq_len} tokens")
 
-        # Calculate LCM to equalize sequence lengths via repetition
-        # This preserves attention: attn(q, k, v) == attn(q, [k]*n, [v]*n)
-        target_length = lcm_for_list(num_tokens)
-        repeats = [target_length // num for num in num_tokens]
-
-        logger.info(f"Using LCM-based repetition: target_length={target_length}, repeats={repeats}")
-
-        # Repeat each conditioning to reach target length
-        repeated_cond_tensors = []
-        for idx, (cond, repeat) in enumerate(zip(cond_tensors, repeats)):
-            if repeat > 1:
-                # Repeat along sequence dimension (dim=1)
-                repeated = cond.repeat(1, repeat, 1)
-                logger.debug(f"Repeated conditioning {idx}: {cond.shape[1]} -> {repeated.shape[1]} tokens (x{repeat})")
-                repeated_cond_tensors.append(repeated)
+        # Pad all tensors to the same sequence length
+        padded_cond_tensors = []
+        for idx, cond in enumerate(cond_tensors):
+            current_seq_len = cond.shape[1]
+            if current_seq_len < max_seq_len:
+                # Pad along dimension 1 (sequence dimension)
+                pad_amount = max_seq_len - current_seq_len
+                padded = torch.nn.functional.pad(cond, (0, 0, 0, pad_amount), mode='constant', value=0)
+                logger.debug(f"Padded conditioning {idx}: {current_seq_len} -> {max_seq_len} tokens (+{pad_amount})")
+                padded_cond_tensors.append(padded)
             else:
-                repeated_cond_tensors.append(cond)
+                padded_cond_tensors.append(cond)
 
-        # Concatenate along batch dimension to create single batched conditioning
-        batched_cond = torch.cat(repeated_cond_tensors, dim=0)
+        # Concatenate along batch dimension - single batched tensor
+        batched_cond = torch.cat(padded_cond_tensors, dim=0)
         batched_pooled = torch.cat(pooled_tensors, dim=0)
 
         logger.info(f"✓ Created batched conditioning: {batched_cond.shape}, pooled: {batched_pooled.shape}")
 
+        # Return single conditioning with batched tensors
         return ([[batched_cond, {"pooled_output": batched_pooled}]],)
 
 
