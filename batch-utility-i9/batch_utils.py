@@ -30,7 +30,19 @@ class ConditioningDuplicate:
         for i in range(count):
             # Deep copy each conditioning item to avoid shared references
             cond_tensor = conditioning[0][0].clone()
-            pooled_tensor = conditioning[0][1]["pooled_output"].clone()
+
+            # Handle None pooled_output (some CLIP encodes don't produce it)
+            pooled = conditioning[0][1].get("pooled_output")
+            if pooled is not None:
+                pooled_tensor = pooled.clone()
+            else:
+                # Create zero tensor if pooled is None
+                hidden_dim = cond_tensor.shape[-1] if len(cond_tensor.shape) >= 2 else 768
+                pooled_tensor = torch.zeros((cond_tensor.shape[0], hidden_dim),
+                                           dtype=cond_tensor.dtype,
+                                           device=cond_tensor.device)
+                logger.debug(f"Created zero pooled tensor with shape {pooled_tensor.shape}")
+
             duplicated.append([cond_tensor, {"pooled_output": pooled_tensor}])
 
         logger.info(f"✓ Duplicated conditioning {count} times for batch processing")
