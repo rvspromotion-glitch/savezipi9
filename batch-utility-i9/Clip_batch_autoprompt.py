@@ -204,14 +204,16 @@ class CLIPTextEncodeBatch:
             else:
                 padded_cond_tensors.append(cond)
 
-        # Concatenate along batch dimension - single batched tensor
-        batched_cond = torch.cat(padded_cond_tensors, dim=0)
-        batched_pooled = torch.cat(pooled_tensors, dim=0)
+        # Return as list of separate conditioning items for proper batch pairing
+        # RES4LYF/ClownKSampler expects: [[cond0, {}], [cond1, {}], [cond2, {}]]
+        conditionings = []
+        for idx, (cond, pooled) in enumerate(zip(padded_cond_tensors, pooled_tensors)):
+            conditionings.append([cond, {"pooled_output": pooled}])
 
-        logger.info(f"✓ Created batched conditioning: {batched_cond.shape}, pooled: {batched_pooled.shape}")
+        logger.info(f"✓ Created {len(conditionings)} separate conditionings for batch pairing")
 
-        # Return single conditioning with batched tensors
-        return ([[batched_cond, {"pooled_output": batched_pooled}]],)
+        # Return as list (not wrapped in extra brackets)
+        return (conditionings,)
 
 
 class CLIPTextEncodeSequence:
