@@ -230,17 +230,107 @@ class CLIPTextEncodeSequence:
         logger = logging.getLogger("CLIPTextEncodeSequence")
 
         clip_model = clip[0]
-        
-        logger.info(f"Encoding {len(prompts)} prompts as sequence")
-        
+        batch_size = len(prompts)
+
+        logger.info(f"Encoding {batch_size} prompts as sequence")
+
         conditionings = []
         for idx, prompt_text in enumerate(prompts):
-            tokens = clip_model.tokenize(prompt_text)
-            cond, pooled = clip_model.encode_from_tokens(tokens, return_pooled=True)
-            conditionings.append([[cond, {"pooled_output": pooled}]])
-        
+            try:
+                logger.debug(f"[{idx+1}/{batch_size}] Encoding prompt...")
+
+                # Use the same robust encoding logic as CLIPTextEncodeBatch
+                if not prompt_text or not prompt_text.strip():
+                    logger.warning(f"Prompt {idx+1} is empty, using fallback")
+                    prompt_text = "empty prompt"
+
+                cond = None
+                pooled = None
+
+                # Try direct encode first
+                if hasattr(clip_model, 'encode'):
+                    try:
+                        result = clip_model.encode(prompt_text)
+                        if torch.is_tensor(result):
+                            cond = result
+                    except:
+                        pass
+
+                # Fallback to tokenize method
+                if cond is None:
+                    tokens = clip_model.tokenize(prompt_text)
+                    result = clip_model.encode_from_tokens(tokens, return_pooled=True)
+
+                    if isinstance(result, tuple) and len(result) == 2:
+                        cond, pooled = result
+                    else:
+                        cond = result if torch.is_tensor(result) else result[0]
+
+                # Create zero pooled if None
+                if pooled is None:
+                    logger.debug(f"[{idx+1}/{batch_size}] Creating zero pooled tensor")
+                    hidden_dim = cond.shape[-1] if len(cond.shape) >= 2 else 768
+                    pooled = torch.zeros((cond.shape[0], hidden_dim), dtype=cond.dtype, device=cond.device)
+
+                logger.debug(f"[{idx+1}/{batch_size}] Encoded: cond shape={cond.shape}, pooled shape={pooled.shape}")
+                conditionings.append([[cond, {"pooled_output": pooled}]])
+
+            except Exception as e:
+                logger.error(f"Error encoding prompt {idx+1}/{batch_size}: {e}", exc_info=True)
+                raise
+
         logger.info(f"✓ Created {len(conditionings)} separate conditionings")
         return (conditionings,)
+
+
+class ConditioningSelector:
+    """
+    Selects a single conditioning from a list based on index.
+    Use with I9 Batch Processing in Sequential mode to pair images with prompts 1-to-1.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING", {"forceInput": True}),
+                "index": ("INT", {"default": 0, "min": 0, "max": 10000}),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("conditioning",)
+    FUNCTION = "select"
+    INPUT_IS_LIST = (True, False)  # conditioning is list, index is single value
+    OUTPUT_IS_LIST = (False,)  # Output single conditioning
+
+    CATEGORY = "conditioning"
+
+    def select(self, conditioning, index):
+        """Select conditioning at specified index."""
+        logger = logging.getLogger("ConditioningSelector")
+
+        cond_list = conditioning
+
+        # Handle index being either int or list[int] (depends on upstream node)
+        if isinstance(index, list):
+            if len(index) == 0:
+                raise ValueError("Index list is empty")
+            idx = index[0]
+            logger.debug(f"Extracted index {idx} from list {index}")
+        else:
+            idx = index
+
+        logger.info(f"Selecting conditioning at index {idx} from list of {len(cond_list)} conditionings")
+
+        if idx < 0 or idx >= len(cond_list):
+            logger.error(f"Index {idx} out of range [0, {len(cond_list)-1}]")
+            raise IndexError(f"Conditioning index {idx} out of range, only {len(cond_list)} conditionings available")
+
+        selected = cond_list[idx]
+        logger.info(f"✓ Selected conditioning {idx}")
+
+        return (selected,)
 
 
 class PromptDebugger:
@@ -333,6 +423,7 @@ class BatchSizeChecker:
 NODE_CLASS_MAPPINGS = {
     "CLIPTextEncodeBatch": CLIPTextEncodeBatch,
     "CLIPTextEncodeSequence": CLIPTextEncodeSequence,
+    "ConditioningSelector": ConditioningSelector,
     "PromptDebugger": PromptDebugger,
     "BatchSizeChecker": BatchSizeChecker,
 }
@@ -340,6 +431,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "CLIPTextEncodeBatch": "CLIP Text Encode (Batch)",
     "CLIPTextEncodeSequence": "CLIP Text Encode (Sequence)",
+    "ConditioningSelector": "Conditioning Selector (by Index)",
     "PromptDebugger": "Prompt Debugger",
     "BatchSizeChecker": "Batch Size Checker",
 }
