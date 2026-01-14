@@ -187,28 +187,13 @@ class CLIPTextEncodeBatch:
             if cond is None or pooled is None:
                 raise RuntimeError(f"None tensor found at index {idx}: cond={cond}, pooled={pooled}")
 
-        # Find maximum sequence length - pad to this (simple and efficient)
-        max_seq_len = max(cond.shape[1] for cond in cond_tensors)
-        logger.info(f"Max sequence length: {max_seq_len} tokens")
-
-        # Pad all tensors to the same sequence length
-        padded_cond_tensors = []
-        for idx, cond in enumerate(cond_tensors):
-            current_seq_len = cond.shape[1]
-            if current_seq_len < max_seq_len:
-                # Pad along dimension 1 (sequence dimension)
-                pad_amount = max_seq_len - current_seq_len
-                padded = torch.nn.functional.pad(cond, (0, 0, 0, pad_amount), mode='constant', value=0)
-                logger.debug(f"Padded conditioning {idx}: {current_seq_len} -> {max_seq_len} tokens (+{pad_amount})")
-                padded_cond_tensors.append(padded)
-            else:
-                padded_cond_tensors.append(cond)
-
         # Return as list of separate conditioning items for proper batch pairing
         # RES4LYF/ClownKSampler expects: [[cond0, {}], [cond1, {}], [cond2, {}]]
+        # Each conditioning keeps its natural length (no padding) to match non-batch behavior
         conditionings = []
-        for idx, (cond, pooled) in enumerate(zip(padded_cond_tensors, pooled_tensors)):
+        for idx, (cond, pooled) in enumerate(zip(cond_tensors, pooled_tensors)):
             conditionings.append([cond, {"pooled_output": pooled}])
+            logger.debug(f"Conditioning {idx}: shape {cond.shape}, pooled shape {pooled.shape}")
 
         logger.info(f"✓ Created {len(conditionings)} separate conditionings for batch pairing")
 
