@@ -311,7 +311,15 @@ class ConditioningSelector:
         logger = logging.getLogger("ConditioningSelector")
 
         cond_list = conditioning
-        idx = index
+
+        # Handle index being either int or list[int] (depends on upstream node)
+        if isinstance(index, list):
+            if len(index) == 0:
+                raise ValueError("Index list is empty")
+            idx = index[0]
+            logger.debug(f"Extracted index {idx} from list {index}")
+        else:
+            idx = index
 
         logger.info(f"Selecting conditioning at index {idx} from list of {len(cond_list)} conditionings")
 
