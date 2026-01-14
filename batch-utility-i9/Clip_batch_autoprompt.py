@@ -192,14 +192,15 @@ class CLIPTextEncodeBatch:
             else:
                 padded_cond_tensors.append(cond)
 
-        # Concatenate all conditioning tensors along batch dimension
-        logger.debug(f"Concatenating {len(padded_cond_tensors)} cond tensors and {len(pooled_tensors)} pooled tensors")
-        batched_cond = torch.cat(padded_cond_tensors, dim=0)
-        batched_pooled = torch.cat(pooled_tensors, dim=0)
-        
-        logger.info(f"✓ Created batched conditioning: {batched_cond.shape}, pooled: {batched_pooled.shape}")
-        
-        return ([[batched_cond, {"pooled_output": batched_pooled}]],)
+        # Return as list of separate conditioning items (one per prompt)
+        # This allows the sampler to properly pair each image with its conditioning
+        conditionings = []
+        for idx, (cond, pooled) in enumerate(zip(padded_cond_tensors, pooled_tensors)):
+            conditionings.append([cond, {"pooled_output": pooled}])
+
+        logger.info(f"✓ Created {len(conditionings)} separate conditionings (max seq len: {max_seq_len})")
+
+        return (conditionings,)
 
 
 class CLIPTextEncodeSequence:
