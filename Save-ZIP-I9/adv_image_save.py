@@ -3,6 +3,7 @@ import json
 import zipfile
 import io
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 import numpy as np
 import folder_paths
 from server import PromptServer
@@ -57,17 +58,17 @@ class AdvancedImageSave:
         for batch_number, image in enumerate(images):
             i = 255. * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-            metadata = None
-            
+            metadata = PngInfo()
+
             if not isinstance(extra_pnginfo, dict):
                 extra_pnginfo = {}
 
+            # Add workflow metadata to PNG
             if prompt is not None:
-                metadata = {}
-                metadata["prompt"] = json.dumps(prompt)
+                metadata.add_text("prompt", json.dumps(prompt))
                 if extra_pnginfo is not None:
-                    for x in extra_pnginfo:
-                        metadata[x] = json.dumps(extra_pnginfo[x])
+                    for key, value in extra_pnginfo.items():
+                        metadata.add_text(key, json.dumps(value))
 
             file = f"{filename}_{counter:05}_.png"
             img_path = os.path.join(full_output_folder, file)
