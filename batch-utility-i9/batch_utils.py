@@ -122,14 +122,53 @@ class ListToBatch:
         return (batched,)
 
 
+class VAEEncodeList:
+    """
+    VAE Encode that preserves list format.
+    Takes list of images, outputs list of latents.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pixels": ("IMAGE",),
+                "vae": ("VAE",),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    INPUT_IS_LIST = (True, False)  # pixels is list, vae is single
+    OUTPUT_IS_LIST = (True,)  # Output as list
+    FUNCTION = "encode"
+    CATEGORY = "latent"
+
+    def encode(self, pixels, vae):
+        """Encode each image separately, return as list of latents."""
+        logger = logging.getLogger("VAEEncodeList")
+
+        # pixels is a list of tensors, vae is single VAE object (not a list)
+        latents = []
+        for idx, pixel in enumerate(pixels):
+            # Encode this image
+            encoded = vae.encode(pixel[:,:,:,:3])  # Remove alpha if present
+            latents.append({"samples": encoded})
+            logger.debug(f"Encoded image {idx}: latent shape {encoded.shape}")
+
+        logger.info(f"✓ Encoded {len(latents)} images as separate latents (list format)")
+        return (latents,)
+
+
 NODE_CLASS_MAPPINGS = {
     "ConditioningDuplicate": ConditioningDuplicate,
     "BatchToList": BatchToList,
     "ListToBatch": ListToBatch,
+    "VAEEncodeList": VAEEncodeList,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ConditioningDuplicate": "Conditioning Duplicate",
     "BatchToList": "Batch → List",
     "ListToBatch": "List → Batch",
+    "VAEEncodeList": "VAE Encode (List)",
 }
