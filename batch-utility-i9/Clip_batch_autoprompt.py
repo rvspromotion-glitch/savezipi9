@@ -1,5 +1,19 @@
 import logging
 import torch
+import math
+
+
+def lcm(a, b):
+    """Calculate least common multiple of two numbers."""
+    return a * b // math.gcd(a, b)
+
+
+def lcm_for_list(numbers):
+    """Calculate LCM for a list of numbers."""
+    current_lcm = numbers[0]
+    for number in numbers[1:]:
+        current_lcm = lcm(current_lcm, number)
+    return current_lcm
 
 
 class CLIPTextEncodeBatch:
@@ -173,32 +187,34 @@ class CLIPTextEncodeBatch:
             if cond is None or pooled is None:
                 raise RuntimeError(f"None tensor found at index {idx}: cond={cond}, pooled={pooled}")
 
-        # Find maximum sequence length across all tensors
-        max_seq_len = max(cond.shape[1] for cond in cond_tensors)
-        logger.debug(f"Max sequence length: {max_seq_len}")
+        # Get token counts for each conditioning
+        num_tokens = [cond.shape[1] for cond in cond_tensors]
+        logger.debug(f"Token counts: {num_tokens}")
 
-        # Pad all tensors to the same sequence length
-        padded_cond_tensors = []
-        for idx, cond in enumerate(cond_tensors):
-            current_seq_len = cond.shape[1]
-            if current_seq_len < max_seq_len:
-                # Pad along dimension 1 (sequence dimension)
-                # torch.nn.functional.pad format: (left, right, top, bottom, front, back)
-                # For 3D tensor [batch, seq, embed]: pad as (0, 0, 0, pad_amount)
-                pad_amount = max_seq_len - current_seq_len
-                padded = torch.nn.functional.pad(cond, (0, 0, 0, pad_amount), mode='constant', value=0)
-                logger.debug(f"Padded tensor {idx} from {current_seq_len} to {max_seq_len}")
-                padded_cond_tensors.append(padded)
+        # Calculate LCM to equalize sequence lengths via repetition
+        # This preserves attention: attn(q, k, v) == attn(q, [k]*n, [v]*n)
+        target_length = lcm_for_list(num_tokens)
+        repeats = [target_length // num for num in num_tokens]
+
+        logger.info(f"Using LCM-based repetition: target_length={target_length}, repeats={repeats}")
+
+        # Repeat each conditioning to reach target length
+        repeated_cond_tensors = []
+        for idx, (cond, repeat) in enumerate(zip(cond_tensors, repeats)):
+            if repeat > 1:
+                # Repeat along sequence dimension (dim=1)
+                repeated = cond.repeat(1, repeat, 1)
+                logger.debug(f"Repeated conditioning {idx}: {cond.shape[1]} -> {repeated.shape[1]} tokens (x{repeat})")
+                repeated_cond_tensors.append(repeated)
             else:
-                padded_cond_tensors.append(cond)
+                repeated_cond_tensors.append(cond)
 
-        # Concatenate all conditioning tensors along batch dimension
-        logger.debug(f"Concatenating {len(padded_cond_tensors)} cond tensors and {len(pooled_tensors)} pooled tensors")
-        batched_cond = torch.cat(padded_cond_tensors, dim=0)
+        # Concatenate along batch dimension to create single batched conditioning
+        batched_cond = torch.cat(repeated_cond_tensors, dim=0)
         batched_pooled = torch.cat(pooled_tensors, dim=0)
-        
+
         logger.info(f"✓ Created batched conditioning: {batched_cond.shape}, pooled: {batched_pooled.shape}")
-        
+
         return ([[batched_cond, {"pooled_output": batched_pooled}]],)
 
 
