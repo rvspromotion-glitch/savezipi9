@@ -15,7 +15,7 @@ class ConditioningDuplicate:
         }
 
     RETURN_TYPES = ("CONDITIONING",)
-    OUTPUT_IS_LIST = (True,)
+    OUTPUT_IS_LIST = (False,)  # Return as single conditioning list, not individual items
     FUNCTION = "duplicate"
     CATEGORY = "conditioning"
 
