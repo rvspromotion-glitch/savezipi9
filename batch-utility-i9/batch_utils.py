@@ -2,6 +2,41 @@ import logging
 import torch
 
 
+class ConditioningDuplicate:
+    """Duplicates a single conditioning N times to create a list for batch processing."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+                "count": ("INT", {"default": 1, "min": 1, "max": 100, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "duplicate"
+    CATEGORY = "conditioning"
+
+    def duplicate(self, conditioning, count):
+        """Duplicate the conditioning N times."""
+        logger = logging.getLogger("ConditioningDuplicate")
+
+        # conditioning comes as [[tensor, {"pooled_output": tensor}]]
+        # We need to duplicate it N times as separate items in a list
+
+        duplicated = []
+        for i in range(count):
+            # Deep copy each conditioning item to avoid shared references
+            cond_tensor = conditioning[0][0].clone()
+            pooled_tensor = conditioning[0][1]["pooled_output"].clone()
+            duplicated.append([cond_tensor, {"pooled_output": pooled_tensor}])
+
+        logger.info(f"✓ Duplicated conditioning {count} times for batch processing")
+        return (duplicated,)
+
+
 class BatchToList:
     """
     Converts a batched image tensor to a list of individual images.
@@ -76,11 +111,13 @@ class ListToBatch:
 
 
 NODE_CLASS_MAPPINGS = {
+    "ConditioningDuplicate": ConditioningDuplicate,
     "BatchToList": BatchToList,
     "ListToBatch": ListToBatch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "ConditioningDuplicate": "Conditioning Duplicate",
     "BatchToList": "Batch → List",
     "ListToBatch": "List → Batch",
 }
