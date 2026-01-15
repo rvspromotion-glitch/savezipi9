@@ -3,8 +3,7 @@ Batch-compatible version of NovaNodes from Image-Detection-Bypass-Utility
 Original: https://github.com/PurinNyova/Image-Detection-Bypass-Utility
 
 This wrapper adds batch processing capability while preserving all original
-functionality. Processes each image in the batch individually through the
-original pipeline.
+functionality and exact parameter names/defaults.
 """
 
 import torch
@@ -13,6 +12,7 @@ from PIL import Image
 import tempfile
 import os
 import logging
+import json
 
 # Import the original processing function
 try:
@@ -22,6 +22,7 @@ except ImportError:
     NOVA_AVAILABLE = False
     print("WARNING: image_postprocess module not found. Install Image-Detection-Bypass-Utility first.")
     print("cd /workspace/ComfyUI/custom_nodes && git clone https://github.com/PurinNyova/Image-Detection-Bypass-Utility")
+
 
 def to_pil_from_any(img_input):
     """Convert torch tensor or numpy array to PIL RGB image."""
@@ -55,113 +56,130 @@ def to_pil_from_any(img_input):
     return Image.fromarray(img_np).convert("RGB")
 
 
-def _parse_int_list(s):
-    """Parse comma-separated string to list of ints."""
-    if isinstance(s, list):
-        return s
-    s = s.strip()
-    if not s:
-        return []
-    return [int(x.strip()) for x in s.split(",")]
+class CameraOptionsNodeBatch:
+    """Camera simulation options - batch compatible version."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "enable_bayer": ("BOOLEAN", {"default": False}),
+                "apply_jpeg_cycles_o": ("BOOLEAN", {"default": True}),
+                "jpeg_cycles": ("INT", {"default": 6, "min": 1, "max": 10}),
+                "jpeg_quality": ("INT", {"default": 70, "min": 10, "max": 100}),
+                "jpeg_qmax": ("INT", {"default": 95, "min": 10, "max": 100}),
+                "apply_vignette_o": ("BOOLEAN", {"default": True}),
+                "vignette_strength": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "apply_chromatic_aberration_o": ("BOOLEAN", {"default": True}),
+                "ca_shift": ("FLOAT", {"default": 1.20, "min": 0.0, "max": 5.0, "step": 0.01}),
+                "iso_scale": ("FLOAT", {"default": 1.00, "min": 0.1, "max": 16.0, "step": 0.01}),
+                "read_noise": ("FLOAT", {"default": 2.00, "min": 0.0, "max": 50.0, "step": 0.1}),
+                "hot_pixel_prob": ("FLOAT", {"default": 0.0000001, "min": 0.0, "max": 0.001, "step": 0.0000001}),
+                "apply_banding_o": ("BOOLEAN", {"default": True}),
+                "banding_strength": ("FLOAT", {"default": 0.00, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "apply_motion_blur_o": ("BOOLEAN", {"default": False}),
+                "motion_blur_ksize": ("INT", {"default": 1, "min": 1, "max": 31, "step": 2}),
+            }
+        }
+
+    RETURN_TYPES = ("CAMERAOPT",)
+    FUNCTION = "get_cam_opts"
+    CATEGORY = "image/postprocessing"
+
+    def get_cam_opts(self, **kwargs):
+        """Returns JSON string with camera options."""
+        return (json.dumps(kwargs),)
 
 
-def _parse_float_list(s):
-    """Parse comma-separated string to list of floats."""
-    if isinstance(s, list):
-        return s
-    s = s.strip()
-    if not s:
-        return []
-    return [float(x.strip()) for x in s.split(",")]
+class NSOptionsNodeBatch:
+    """Non-semantic attack options - batch compatible version."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "non_semantic": ("BOOLEAN", {"default": False}),
+                "ns_iterations": ("INT", {"default": 10, "min": 1, "max": 10000}),
+                "ns_learning_rate": ("FLOAT", {"default": 0.0003, "min": 0.000001, "max": 1.0, "step": 0.0001}),
+                "ns_t_lpips": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "ns_t_l2": ("FLOAT", {"default": 0.00003, "min": 0.0, "max": 1.0, "step": 0.00001}),
+                "ns_c_lpips": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "ns_c_l2": ("FLOAT", {"default": 0.60, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "ns_grad_clip": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("NONSEMANTICOP",)
+    FUNCTION = "get_ns_opts"
+    CATEGORY = "image/postprocessing"
+
+    def get_ns_opts(self, **kwargs):
+        """Returns JSON string with non-semantic options."""
+        return (json.dumps(kwargs),)
 
 
 class NovaNodesBatch:
-    """
-    Batch-compatible version of NovaNodes for AI detection bypass.
-    Processes each image in the batch individually through the original pipeline.
-    """
+    """Main image postprocessing node - batch compatible version."""
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE",),
+                "Cam_Opt": ("CAMERAOPT",),
+                "NS_Opt": ("NONSEMANTICOP",),
+                "apply_noise_o": ("BOOLEAN", {"default": True}),
+                "noise_std_frac": ("FLOAT", {"default": 0.020, "min": 0.0, "max": 0.1, "step": 0.001}),
+                "apply_clahe_o": ("BOOLEAN", {"default": True}),
+                "clahe_clip": ("FLOAT", {"default": 2.00, "min": 0.5, "max": 10.0, "step": 0.1}),
+                "clahe_grid": ("INT", {"default": 8, "min": 2, "max": 32}),
+                "fourier_cutoff": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "apply_fourier_o": ("BOOLEAN", {"default": True}),
+                "fourier_strength": ("FLOAT", {"default": 0.90, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "fourier_randomness": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 0.5, "step": 0.01}),
+                "fourier_phase_perturb": ("FLOAT", {"default": 0.04, "min": 0.0, "max": 0.5, "step": 0.01}),
+                "fourier_radial_smooth": ("INT", {"default": 0, "min": 0, "max": 50}),
+                "fourier_mode": (["auto", "ref", "model"], {"default": "auto"}),
+                "fourier_alpha": ("FLOAT", {"default": 1.00, "min": 0.1, "max": 4.0, "step": 0.01}),
+                "perturb_mag_frac": ("FLOAT", {"default": 0.001, "min": 0.0, "max": 0.05, "step": 0.001}),
+                "enable_awb": ("BOOLEAN", {"default": True}),
+                "enable_lut": ("BOOLEAN", {"default": False}),
+                "lut": ("STRING", {"default": "X://insert/path/here(.png/.npy/.cube)"}),
+                "lut_strength": ("FLOAT", {"default": 1.00, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "glcm": ("BOOLEAN", {"default": False}),
+                "glcm_distances": ("STRING", {"default": "1,3"}),
+                "glcm_angles": ("STRING", {"default": "0,0.785398,1.5708,2.35619"}),
+                "glcm_levels": ("INT", {"default": 256, "min": 2, "max": 65536}),
+                "glcm_strength": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "lbp": ("BOOLEAN", {"default": False}),
+                "lbp_radius": ("INT", {"default": 1, "min": 1, "max": 50}),
+                "lbp_n_points": ("INT", {"default": 8, "min": 1, "max": 512}),
+                "lbp_method": (["default", "ror", "uniform", "var"], {"default": "uniform"}),
+                "lbp_strength": ("FLOAT", {"default": 0.30, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "seed": ("INT", {"default": -1, "min": -1, "max": 2147483647}),
+                "apply_exif_o": ("BOOLEAN", {"default": True}),
             },
             "optional": {
-                # Noise options
-                "apply_noise_o": ("BOOLEAN", {"default": True}),
-                "noise_std_frac": ("FLOAT", {"default": 0.02, "min": 0.0, "max": 0.2, "step": 0.001}),
-
-                # CLAHE options
-                "apply_clahe": ("BOOLEAN", {"default": False}),
-                "clahe_clip_limit": ("FLOAT", {"default": 2.0, "min": 0.1, "max": 10.0, "step": 0.1}),
-                "clahe_tile_size": ("INT", {"default": 8, "min": 2, "max": 64}),
-
-                # FFT options
-                "apply_fft": ("BOOLEAN", {"default": False}),
-                "fft_cutoff": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "fft_strength": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "fft_randomness": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "fft_ref_image": ("IMAGE",),
-
-                # GLCM options
-                "apply_glcm": ("BOOLEAN", {"default": False}),
-                "glcm_distances": ("STRING", {"default": "1,3"}),
-                "glcm_angles": ("STRING", {"default": "0,45,90,135"}),
-                "glcm_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-
-                # LBP options
-                "apply_lbp": ("BOOLEAN", {"default": False}),
-                "lbp_radius": ("INT", {"default": 1, "min": 1, "max": 8}),
-                "lbp_n_points": ("INT", {"default": 8, "min": 4, "max": 24, "step": 4}),
-                "lbp_strength": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
-
-                # Perturbation options
-                "apply_perturb": ("BOOLEAN", {"default": False}),
-                "perturb_max_shift": ("INT", {"default": 2, "min": 1, "max": 10}),
-
-                # Camera simulation options
-                "apply_sim_camera": ("BOOLEAN", {"default": False}),
-                "sim_bayer_pattern": ("BOOLEAN", {"default": True}),
-                "sim_jpeg_cycles": ("INT", {"default": 1, "min": 0, "max": 5}),
-                "sim_jpeg_quality": ("INT", {"default": 85, "min": 50, "max": 100}),
-                "sim_vignetting": ("BOOLEAN", {"default": True}),
-                "sim_chrom_aberration": ("BOOLEAN", {"default": False}),
-
-                # AWB options
-                "apply_awb": ("BOOLEAN", {"default": False}),
                 "awb_ref_image": ("IMAGE",),
-
-                # Non-semantic attack options
-                "apply_non_semantic": ("BOOLEAN", {"default": False}),
-                "ns_num_iter": ("INT", {"default": 10, "min": 1, "max": 100}),
-                "ns_epsilon": ("FLOAT", {"default": 0.03, "min": 0.001, "max": 0.1, "step": 0.001}),
-
-                # LUT options
-                "apply_lut": ("BOOLEAN", {"default": False}),
-                "lut_path": ("STRING", {"default": ""}),
-
-                # Blend options
-                "apply_blend": ("BOOLEAN", {"default": False}),
-                "blend_alpha": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "blend_image": ("IMAGE",),
-
-                # EXIF options
-                "add_fake_exif": ("BOOLEAN", {"default": False}),
+                "fft_ref_image": ("IMAGE",),
             }
         }
 
     RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "exif_data")
+    RETURN_NAMES = ("IMAGE", "EXIF")
     FUNCTION = "process_batch"
     CATEGORY = "image/postprocessing"
 
-    def process_batch(self, image, **kwargs):
+    def process_batch(self, image, Cam_Opt, NS_Opt, **kwargs):
         """Process entire batch of images through NovaNodes pipeline."""
         logger = logging.getLogger("NovaNodesBatch")
 
         if not NOVA_AVAILABLE:
             raise ImportError("image_postprocess module not found. Install Image-Detection-Bypass-Utility first.")
+
+        # Parse option JSON strings
+        cam_opts = json.loads(Cam_Opt)
+        ns_opts = json.loads(NS_Opt)
 
         # Get batch size
         batch_size = image.shape[0]
@@ -175,10 +193,12 @@ class NovaNodesBatch:
             logger.debug(f"Processing image {idx + 1}/{batch_size}")
 
             # Extract single image from batch
-            single_image = image[idx:idx+1]  # Keep batch dimension
+            single_image = image[idx:idx+1]
 
             # Process this image
-            processed_tensor, exif_data = self._process_single(single_image, idx, **kwargs)
+            processed_tensor, exif_data = self._process_single(
+                single_image, idx, cam_opts, ns_opts, **kwargs
+            )
 
             processed_tensors.append(processed_tensor)
             exif_data_list.append(exif_data)
@@ -196,7 +216,7 @@ class NovaNodesBatch:
 
         return (batch_output, combined_exif)
 
-    def _process_single(self, image, idx, **kwargs):
+    def _process_single(self, image, idx, cam_opts, ns_opts, **kwargs):
         """Process a single image through the NovaNodes pipeline."""
         # Convert tensor to PIL
         pil_img = to_pil_from_any(image[0])
@@ -216,20 +236,52 @@ class NovaNodesBatch:
 
             args = Args()
 
-            # Noise
+            # Camera options (from JSON)
+            args.sim_camera = cam_opts.get("enable_bayer") or cam_opts.get("apply_jpeg_cycles_o") or \
+                             cam_opts.get("apply_vignette_o") or cam_opts.get("apply_chromatic_aberration_o") or \
+                             cam_opts.get("apply_banding_o") or cam_opts.get("apply_motion_blur_o")
+            args.sim_bayer_pattern = cam_opts.get("enable_bayer", False)
+            args.sim_jpeg_cycles = cam_opts.get("jpeg_cycles", 1) if cam_opts.get("apply_jpeg_cycles_o", False) else 0
+            args.sim_jpeg_quality = cam_opts.get("jpeg_quality", 70)
+            args.sim_jpeg_qmax = cam_opts.get("jpeg_qmax", 95)
+            args.sim_vignetting = cam_opts.get("apply_vignette_o", False)
+            args.sim_vignette_strength = cam_opts.get("vignette_strength", 0.35)
+            args.sim_chrom_aberration = cam_opts.get("apply_chromatic_aberration_o", False)
+            args.sim_ca_shift = cam_opts.get("ca_shift", 1.20)
+            args.sim_iso_scale = cam_opts.get("iso_scale", 1.0)
+            args.sim_read_noise = cam_opts.get("read_noise", 2.0)
+            args.sim_hot_pixel_prob = cam_opts.get("hot_pixel_prob", 1e-7)
+            args.sim_banding = cam_opts.get("apply_banding_o", False)
+            args.sim_banding_strength = cam_opts.get("banding_strength", 0.0)
+            args.sim_motion_blur = cam_opts.get("apply_motion_blur_o", False)
+            args.sim_motion_blur_ksize = cam_opts.get("motion_blur_ksize", 1)
+
+            # Non-semantic options (from JSON)
+            args.non_semantic = ns_opts.get("non_semantic", False)
+            args.ns_num_iter = ns_opts.get("ns_iterations", 10)
+            args.ns_learning_rate = ns_opts.get("ns_learning_rate", 0.0003)
+            args.ns_t_lpips = ns_opts.get("ns_t_lpips", 0.04)
+            args.ns_t_l2 = ns_opts.get("ns_t_l2", 0.00003)
+            args.ns_c_lpips = ns_opts.get("ns_c_lpips", 0.01)
+            args.ns_c_l2 = ns_opts.get("ns_c_l2", 0.6)
+            args.ns_grad_clip = ns_opts.get("ns_grad_clip", 0.05)
+
+            # Main parameters (from kwargs)
             args.noise = kwargs.get("apply_noise_o", True)
             args.noise_std_frac = kwargs.get("noise_std_frac", 0.02)
 
-            # CLAHE
-            args.clahe = kwargs.get("apply_clahe", False)
-            args.clahe_clip_limit = kwargs.get("clahe_clip_limit", 2.0)
-            args.clahe_tile_size = kwargs.get("clahe_tile_size", 8)
+            args.clahe = kwargs.get("apply_clahe_o", True)
+            args.clahe_clip_limit = kwargs.get("clahe_clip", 2.0)
+            args.clahe_tile_size = kwargs.get("clahe_grid", 8)
 
-            # FFT
-            args.fft = kwargs.get("apply_fft", False)
-            args.fft_cutoff = kwargs.get("fft_cutoff", 0.1)
-            args.fft_strength = kwargs.get("fft_strength", 0.3)
-            args.fft_randomness = kwargs.get("fft_randomness", 0.1)
+            args.fft = kwargs.get("apply_fourier_o", True)
+            args.fft_cutoff = kwargs.get("fourier_cutoff", 0.25)
+            args.fft_strength = kwargs.get("fourier_strength", 0.9)
+            args.fft_randomness = kwargs.get("fourier_randomness", 0.05)
+            args.fft_phase_perturb = kwargs.get("fourier_phase_perturb", 0.04)
+            args.fft_radial_smooth = kwargs.get("fourier_radial_smooth", 0)
+            args.fft_mode = kwargs.get("fourier_mode", "auto")
+            args.fft_alpha = kwargs.get("fourier_alpha", 1.0)
 
             # Handle FFT reference image
             fft_ref_image = kwargs.get("fft_ref_image")
@@ -242,32 +294,10 @@ class NovaNodesBatch:
             else:
                 args.fft_ref = None
 
-            # GLCM
-            args.glcm = kwargs.get("apply_glcm", False)
-            args.glcm_distances = _parse_int_list(kwargs.get("glcm_distances", "1,3"))
-            args.glcm_angles = _parse_int_list(kwargs.get("glcm_angles", "0,45,90,135"))
-            args.glcm_strength = kwargs.get("glcm_strength", 0.5)
+            args.perturb = kwargs.get("perturb_mag_frac", 0.001) > 0.0
+            args.perturb_max_shift = int(kwargs.get("perturb_mag_frac", 0.001) * 100)
 
-            # LBP
-            args.lbp = kwargs.get("apply_lbp", False)
-            args.lbp_radius = kwargs.get("lbp_radius", 1)
-            args.lbp_n_points = kwargs.get("lbp_n_points", 8)
-            args.lbp_strength = kwargs.get("lbp_strength", 0.3)
-
-            # Perturbation
-            args.perturb = kwargs.get("apply_perturb", False)
-            args.perturb_max_shift = kwargs.get("perturb_max_shift", 2)
-
-            # Camera simulation
-            args.sim_camera = kwargs.get("apply_sim_camera", False)
-            args.sim_bayer_pattern = kwargs.get("sim_bayer_pattern", True)
-            args.sim_jpeg_cycles = kwargs.get("sim_jpeg_cycles", 1)
-            args.sim_jpeg_quality = kwargs.get("sim_jpeg_quality", 85)
-            args.sim_vignetting = kwargs.get("sim_vignetting", True)
-            args.sim_chrom_aberration = kwargs.get("sim_chrom_aberration", False)
-
-            # AWB
-            args.awb = kwargs.get("apply_awb", False)
+            args.awb = kwargs.get("enable_awb", True)
             awb_ref_image = kwargs.get("awb_ref_image")
             if awb_ref_image is not None and args.awb:
                 with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_awb:
@@ -278,31 +308,28 @@ class NovaNodesBatch:
             else:
                 args.awb_ref = None
 
-            # Non-semantic attack
-            args.non_semantic = kwargs.get("apply_non_semantic", False)
-            args.ns_num_iter = kwargs.get("ns_num_iter", 10)
-            args.ns_epsilon = kwargs.get("ns_epsilon", 0.03)
+            lut_path = kwargs.get("lut", "")
+            args.lut = lut_path if kwargs.get("enable_lut", False) and lut_path and lut_path != "X://insert/path/here(.png/.npy/.cube)" else None
+            args.lut_strength = kwargs.get("lut_strength", 1.0)
 
-            # LUT
-            args.lut = kwargs.get("lut_path", "")
-            if not args.lut:
-                args.lut = None
+            args.glcm = kwargs.get("glcm", False)
+            args.glcm_distances = [int(x.strip()) for x in kwargs.get("glcm_distances", "1,3").split(",")]
+            args.glcm_angles = [float(x.strip()) for x in kwargs.get("glcm_angles", "0,0.785398,1.5708,2.35619").split(",")]
+            args.glcm_levels = kwargs.get("glcm_levels", 256)
+            args.glcm_strength = kwargs.get("glcm_strength", 0.5)
 
-            # Blend
-            args.blend = kwargs.get("apply_blend", False)
-            args.blend_alpha = kwargs.get("blend_alpha", 0.5)
-            blend_image = kwargs.get("blend_image")
-            if blend_image is not None and args.blend:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_blend:
-                    blend_path = tmp_blend.name
-                    blend_pil = to_pil_from_any(blend_image[0])
-                    blend_pil.save(blend_path, "PNG")
-                    args.blend_img = blend_path
-            else:
-                args.blend_img = None
+            args.lbp = kwargs.get("lbp", False)
+            args.lbp_radius = kwargs.get("lbp_radius", 1)
+            args.lbp_n_points = kwargs.get("lbp_n_points", 8)
+            args.lbp_method = kwargs.get("lbp_method", "uniform")
+            args.lbp_strength = kwargs.get("lbp_strength", 0.3)
 
-            # EXIF
-            args.fake_exif = kwargs.get("add_fake_exif", False)
+            args.seed = kwargs.get("seed", -1)
+            args.fake_exif = kwargs.get("apply_exif_o", True)
+
+            # Blend option (not in UI but needed for compatibility)
+            args.blend = False
+            args.blend_img = None
 
             # Run the original processing pipeline
             process_image(input_path, output_path, args)
@@ -334,16 +361,18 @@ class NovaNodesBatch:
                 os.unlink(args.fft_ref)
             if hasattr(args, 'awb_ref') and args.awb_ref and os.path.exists(args.awb_ref):
                 os.unlink(args.awb_ref)
-            if hasattr(args, 'blend_img') and args.blend_img and os.path.exists(args.blend_img):
-                os.unlink(args.blend_img)
 
         return (tensor_out, exif_str)
 
 
 NODE_CLASS_MAPPINGS = {
-    "NovaNodesBatch": NovaNodesBatch
+    "CameraOptionsNodeBatch": CameraOptionsNodeBatch,
+    "NSOptionsNodeBatch": NSOptionsNodeBatch,
+    "NovaNodesBatch": NovaNodesBatch,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "NovaNodesBatch": "Nova Nodes (Batch)"
+    "CameraOptionsNodeBatch": "Camera Options (NOVA)",
+    "NSOptionsNodeBatch": "Non-semantic Options (NOVA)",
+    "NovaNodesBatch": "Image Postprocess (NOVA NODES)",
 }
