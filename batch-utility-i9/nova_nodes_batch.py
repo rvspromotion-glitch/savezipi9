@@ -16,12 +16,23 @@ import json
 
 # Import the original processing function
 try:
+    # Try to import from the Image-Detection-Bypass-Utility custom node
+    import sys
+    import os
+
+    # Add Image-Detection-Bypass-Utility path to sys.path if it exists
+    bypass_util_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "Image-Detection-Bypass-Utility")
+    if os.path.exists(bypass_util_path) and bypass_util_path not in sys.path:
+        sys.path.insert(0, bypass_util_path)
+
     from image_postprocess import process_image
     NOVA_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     NOVA_AVAILABLE = False
-    print("WARNING: image_postprocess module not found. Install Image-Detection-Bypass-Utility first.")
+    print(f"WARNING: image_postprocess module not found: {e}")
+    print("Install Image-Detection-Bypass-Utility:")
     print("cd /workspace/ComfyUI/custom_nodes && git clone https://github.com/PurinNyova/Image-Detection-Bypass-Utility")
+    print("cd Image-Detection-Bypass-Utility && pip install -r requirements.txt")
 
 
 def to_pil_from_any(img_input):
