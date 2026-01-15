@@ -54,7 +54,8 @@ class AdvancedImageSave:
         
         results = list()
         saved_files = []
-        
+        max_preview = 12  # Limit UI preview to 12 images
+
         for batch_number, image in enumerate(images):
             i = 255. * image.cpu().numpy()
             img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
@@ -73,24 +74,37 @@ class AdvancedImageSave:
             file = f"{filename}_{counter:05}_.png"
             img_path = os.path.join(full_output_folder, file)
             img.save(img_path, pnginfo=metadata, compress_level=self.compress_level)
-            
+
             saved_files.append({
                 "filename": file,
                 "subfolder": subfolder,
                 "type": self.type,
                 "path": img_path
             })
-            
-            results.append({
-                "filename": file,
-                "subfolder": subfolder,
-                "type": self.type
-            })
-            
+
+            # Only add to results (UI preview) if under max_preview limit
+            if batch_number < max_preview:
+                results.append({
+                    "filename": file,
+                    "subfolder": subfolder,
+                    "type": self.type
+                })
+
             counter += 1
 
-        # Store file paths for zip download
-        return {"ui": {"images": results, "saved_files": saved_files}}
+        # Add count info to UI
+        ui_data = {
+            "images": results,
+            "saved_files": saved_files,
+        }
+
+        # Add text message showing total count
+        if batch_size > max_preview:
+            ui_data["text"] = [f"Saved {batch_size} images (showing first {max_preview} in preview). All {batch_size} images included in ZIP."]
+        else:
+            ui_data["text"] = [f"Saved {batch_size} images. All included in ZIP."]
+
+        return {"ui": ui_data}
 
 @PromptServer.instance.routes.post("/download_batch_zip")
 async def download_batch_zip(request):
