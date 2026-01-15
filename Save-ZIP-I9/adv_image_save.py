@@ -2,6 +2,7 @@ import os
 import json
 import zipfile
 import io
+import logging
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 import numpy as np
@@ -108,34 +109,56 @@ class AdvancedImageSave:
 
 @PromptServer.instance.routes.post("/download_batch_zip")
 async def download_batch_zip(request):
+    logger = logging.getLogger("ZipDownload")
     try:
         data = await request.json()
         files = data.get("files", [])
-        
+
         if not files:
+            logger.error("No files provided for ZIP download")
             return web.Response(status=400, text="No files provided")
-        
+
+        total_files = len(files)
+        logger.info(f"Starting ZIP creation for {total_files} images...")
+
+        # Use STORED (no compression) for large batches to speed up
+        # PNG files are already compressed, so ZIP compression adds minimal benefit
+        compression = zipfile.ZIP_STORED if total_files > 20 else zipfile.ZIP_DEFLATED
+
+        if compression == zipfile.ZIP_STORED:
+            logger.info("Using ZIP_STORED (no compression) for faster processing")
+
         # Create zip in memory
         zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for file_info in files:
+        with zipfile.ZipFile(zip_buffer, 'w', compression) as zip_file:
+            for idx, file_info in enumerate(files, 1):
                 file_path = file_info.get("path")
                 filename = file_info.get("filename")
-                
+
                 if file_path and os.path.exists(file_path):
                     zip_file.write(file_path, arcname=filename)
-        
+
+                    # Log progress every 10 files or at milestones
+                    if idx % 10 == 0 or idx == total_files:
+                        progress = (idx / total_files) * 100
+                        logger.info(f"ZIP progress: {idx}/{total_files} files ({progress:.1f}%)")
+                else:
+                    logger.warning(f"File not found: {file_path}")
+
         zip_buffer.seek(0)
-        
+        zip_size_mb = len(zip_buffer.getvalue()) / (1024 * 1024)
+        logger.info(f"✓ ZIP created successfully: {total_files} files, {zip_size_mb:.2f} MB")
+
         return web.Response(
             body=zip_buffer.read(),
             headers={
                 'Content-Type': 'application/zip',
-                'Content-Disposition': f'attachment; filename="comfyui_batch.zip"'
+                'Content-Disposition': f'attachment; filename="comfyui_batch_{total_files}_images.zip"'
             }
         )
     except Exception as e:
-        return web.Response(status=500, text=str(e))
+        logger.error(f"ZIP creation failed: {str(e)}", exc_info=True)
+        return web.Response(status=500, text=f"ZIP creation failed: {str(e)}")
 
 NODE_CLASS_MAPPINGS = {
     "AdvancedImageSave": AdvancedImageSave
