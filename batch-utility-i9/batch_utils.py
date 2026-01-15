@@ -220,7 +220,7 @@ NODE_CLASS_MAPPINGS = {
     "BatchToList": BatchToList,
     "ListToBatch": ListToBatch,
     "VAEEncodeList": VAEEncodeList,
-    "CLIPTextEncode": CLIPTextEncode,
+    "CLIPTextEncodeI9": CLIPTextEncode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -228,5 +228,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BatchToList": "Batch → List",
     "ListToBatch": "List → Batch",
     "VAEEncodeList": "VAE Encode (List)",
-    "CLIPTextEncode": "CLIP Text Encode",
+    "CLIPTextEncodeI9": "CLIP Text Encode (I9)",
 }
