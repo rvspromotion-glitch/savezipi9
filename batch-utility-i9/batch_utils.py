@@ -1,5 +1,6 @@
 import logging
 import torch
+import gc
 
 
 class ConditioningDuplicate:
@@ -215,12 +216,66 @@ class CLIPTextEncode:
         return ([[cond, {"pooled_output": pooled}]],)
 
 
+class ClearVRAM:
+    """
+    Clears VRAM and resets cached state.
+    Use between workflows to prevent state corruption without restarting ComfyUI.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {},
+            "optional": {
+                "anything": ("*",),  # Optional passthrough
+            }
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("passthrough",)
+    FUNCTION = "clear_vram"
+    CATEGORY = "utils"
+    OUTPUT_NODE = False
+
+    def clear_vram(self, anything=None):
+        """Clear VRAM and run garbage collection."""
+        logger = logging.getLogger("ClearVRAM")
+
+        # Get memory stats before clearing
+        if torch.cuda.is_available():
+            allocated_before = torch.cuda.memory_allocated() / (1024**3)  # GB
+            reserved_before = torch.cuda.memory_reserved() / (1024**3)    # GB
+            logger.info(f"Before clear: Allocated={allocated_before:.2f}GB, Reserved={reserved_before:.2f}GB")
+
+        # Run Python garbage collection
+        gc.collect()
+        logger.debug("Python garbage collection complete")
+
+        # Clear CUDA cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.debug("CUDA cache cleared")
+
+            # Get memory stats after clearing
+            allocated_after = torch.cuda.memory_allocated() / (1024**3)
+            reserved_after = torch.cuda.memory_reserved() / (1024**3)
+            freed = reserved_before - reserved_after
+            logger.info(f"After clear: Allocated={allocated_after:.2f}GB, Reserved={reserved_after:.2f}GB")
+            logger.info(f"✓ Freed {freed:.2f}GB from CUDA cache")
+        else:
+            logger.info("✓ Garbage collection complete (CUDA not available)")
+
+        # Passthrough the input
+        return (anything,) if anything is not None else (None,)
+
+
 NODE_CLASS_MAPPINGS = {
     "ConditioningDuplicate": ConditioningDuplicate,
     "BatchToList": BatchToList,
     "ListToBatch": ListToBatch,
     "VAEEncodeList": VAEEncodeList,
     "CLIPTextEncodeI9": CLIPTextEncode,
+    "ClearVRAM": ClearVRAM,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -229,4 +284,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ListToBatch": "List → Batch",
     "VAEEncodeList": "VAE Encode (List)",
     "CLIPTextEncodeI9": "CLIP Text Encode (I9)",
+    "ClearVRAM": "Clear VRAM/Cache",
 }
