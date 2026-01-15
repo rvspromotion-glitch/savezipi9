@@ -122,14 +122,111 @@ class ListToBatch:
         return (batched,)
 
 
+class VAEEncodeList:
+    """
+    VAE Encode that preserves list format.
+    Takes list of images, outputs list of latents.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "pixels": ("IMAGE",),
+                "vae": ("VAE",),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    INPUT_IS_LIST = (True, False)  # pixels is list, vae is single
+    OUTPUT_IS_LIST = (True,)  # Output as list
+    FUNCTION = "encode"
+    CATEGORY = "latent"
+
+    def encode(self, pixels, vae):
+        """Encode each image separately, return as list of latents."""
+        logger = logging.getLogger("VAEEncodeList")
+
+        # pixels is a list of tensors, vae is single VAE object (not a list)
+        latents = []
+        for idx, pixel in enumerate(pixels):
+            # Encode this image
+            encoded = vae.encode(pixel[:,:,:,:3])  # Remove alpha if present
+            latents.append({"samples": encoded})
+            logger.debug(f"Encoded image {idx}: latent shape {encoded.shape}")
+
+        logger.info(f"✓ Encoded {len(latents)} images as separate latents (list format)")
+        return (latents,)
+
+
+class CLIPTextEncode:
+    """
+    Simple CLIP text encoder with optional text input.
+    Replicates standard CLIP Text Encode (Prompt) node behavior.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip": ("CLIP",),
+            },
+            "optional": {
+                "text": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "dynamicPrompts": False
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "encode"
+    CATEGORY = "conditioning"
+
+    def encode(self, clip, text=""):
+        """Encode text prompt using CLIP."""
+        logger = logging.getLogger("CLIPTextEncode")
+
+        # Handle empty text
+        if not text or text.strip() == "":
+            logger.debug("Empty prompt provided, encoding empty string")
+            text = ""
+
+        # Tokenize and encode
+        tokens = clip.tokenize(text)
+        output = clip.encode_from_tokens(tokens, return_pooled=True)
+
+        # Handle different return formats
+        if isinstance(output, tuple):
+            cond, pooled = output
+        else:
+            cond = output
+            pooled = None
+
+        # Create zero pooled if None
+        if pooled is None:
+            hidden_dim = cond.shape[-1] if len(cond.shape) >= 2 else 768
+            pooled = torch.zeros((cond.shape[0], hidden_dim), dtype=cond.dtype, device=cond.device)
+            logger.debug(f"Created zero pooled tensor: {pooled.shape}")
+
+        logger.debug(f"Encoded prompt ({len(text)} chars): cond {cond.shape}, pooled {pooled.shape}")
+
+        return ([[cond, {"pooled_output": pooled}]],)
+
+
 NODE_CLASS_MAPPINGS = {
     "ConditioningDuplicate": ConditioningDuplicate,
     "BatchToList": BatchToList,
     "ListToBatch": ListToBatch,
+    "VAEEncodeList": VAEEncodeList,
+    "CLIPTextEncode": CLIPTextEncode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ConditioningDuplicate": "Conditioning Duplicate",
     "BatchToList": "Batch → List",
     "ListToBatch": "List → Batch",
+    "VAEEncodeList": "VAE Encode (List)",
+    "CLIPTextEncode": "CLIP Text Encode",
 }
