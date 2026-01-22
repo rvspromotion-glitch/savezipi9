@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import logging
 import os
 import random
@@ -171,7 +172,18 @@ class GeminiBatchNode:
 
         # Run the async function and get results
         # results is a list of (index, prompt) tuples
-        results = asyncio.run(process_all_images())
+        # Handle both cases: running event loop (ComfyUI) and no event loop
+        try:
+            # Check if we're already in an event loop
+            asyncio.get_running_loop()
+            # If we are, run in a thread pool to avoid nested loop issues
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                results = executor.submit(
+                    lambda: asyncio.run(process_all_images())
+                ).result()
+        except RuntimeError:
+            # No running event loop, safe to use asyncio.run()
+            results = asyncio.run(process_all_images())
 
         # Sort results by index to ensure correct order
         # (This is extra safety, but gather() should already maintain order)
