@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import random
@@ -58,6 +59,49 @@ class GeminiBatchNode:
 
     CATEGORY = "Gemini/Batch"
 
+    async def _process_single_image(
+        self,
+        idx: int,
+        pil_image,
+        model_instance,
+        prompt: str,
+        generation_config,
+        proxy: str | None,
+        batch_size: int,
+        logger,
+    ):
+        """
+        Process a single image asynchronously.
+
+        Returns:
+            tuple: (index, generated_prompt) to preserve ordering
+        """
+        try:
+            # Use temporary_env_var context manager for proxy settings
+            with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
+                # Call the async version of generate_content
+                response = await model_instance.generate_content_async(
+                    [prompt, pil_image],
+                    generation_config=generation_config
+                )
+            generated_prompt = response.text.strip()
+
+            # Detailed logging to debug
+            logger.info(f"Image {idx + 1}/{batch_size}:")
+            logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
+            logger.info(f"  First 150 chars: {generated_prompt[:150]}...")
+            logger.info(f"  Last 150 chars: ...{generated_prompt[-150:]}")
+            logger.debug(f"  Full prompt: {generated_prompt}")
+
+            return (idx, generated_prompt)
+
+        except Exception as e:
+            logger.error(f"Error processing image {idx + 1}/{batch_size}: {e}", exc_info=True)
+            # Fallback to a generic prompt to maintain batch size
+            fallback_prompt = f"Error generating prompt for image {idx + 1}"
+            logger.warning(f"Using fallback prompt: {fallback_prompt}")
+            return (idx, fallback_prompt)
+
     def process_batch(
         self,
         images: Tensor,
@@ -100,34 +144,41 @@ class GeminiBatchNode:
         # Convert batch tensor to list of PIL images
         pil_images = images_to_pillow(images)
         batch_size = len(pil_images)
-        
-        logger.info(f"Processing batch of {batch_size} images through Gemini")
-        
-        # Process each image
-        prompts = []
-        for idx, pil_image in enumerate(pil_images):
-            try:
-                with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
-                    response = model_instance.generate_content(
-                        [prompt, pil_image],
-                        generation_config=generation_config
-                    )
-                generated_prompt = response.text.strip()
-                prompts.append(generated_prompt)
 
-                # Detailed logging to debug truncation
-                logger.info(f"Image {idx + 1}/{batch_size}:")
-                logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
-                logger.info(f"  First 150 chars: {generated_prompt[:150]}...")
-                logger.info(f"  Last 150 chars: ...{generated_prompt[-150:]}")
-                logger.debug(f"  Full prompt: {generated_prompt}")
+        logger.info(f"Processing batch of {batch_size} images through Gemini (concurrently)")
 
-            except Exception as e:
-                logger.error(f"Error processing image {idx + 1}/{batch_size}: {e}", exc_info=True)
-                # Fallback to a generic prompt to maintain batch size
-                fallback_prompt = f"Error generating prompt for image {idx + 1}"
-                prompts.append(fallback_prompt)
-                logger.warning(f"Using fallback prompt: {fallback_prompt}")
+        # Create async tasks for all images
+        # Each task will return (index, prompt) to preserve order
+        async def process_all_images():
+            tasks = []
+            for idx, pil_image in enumerate(pil_images):
+                task = self._process_single_image(
+                    idx=idx,
+                    pil_image=pil_image,
+                    model_instance=model_instance,
+                    prompt=prompt,
+                    generation_config=generation_config,
+                    proxy=proxy,
+                    batch_size=batch_size,
+                    logger=logger,
+                )
+                tasks.append(task)
+
+            # Run all tasks concurrently and wait for all to complete
+            # gather() returns results in the same order as tasks were provided
+            results = await asyncio.gather(*tasks)
+            return results
+
+        # Run the async function and get results
+        # results is a list of (index, prompt) tuples
+        results = asyncio.run(process_all_images())
+
+        # Sort results by index to ensure correct order
+        # (This is extra safety, but gather() should already maintain order)
+        results.sort(key=lambda x: x[0])
+
+        # Extract just the prompts in the correct order
+        prompts = [prompt_text for idx, prompt_text in results]
 
         logger.info(f"Successfully generated {len(prompts)} prompts")
         logger.info(f"Prompt lengths: {[len(p) for p in prompts]}")
