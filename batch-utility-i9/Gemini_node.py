@@ -1,4 +1,3 @@
-import asyncio
 import concurrent.futures
 import logging
 import os
@@ -60,7 +59,7 @@ class GeminiBatchNode:
 
     CATEGORY = "Gemini/Batch"
 
-    async def _process_single_image(
+    def _process_single_image(
         self,
         idx: int,
         pil_image,
@@ -72,7 +71,7 @@ class GeminiBatchNode:
         logger,
     ):
         """
-        Process a single image asynchronously.
+        Process a single image synchronously (runs in thread pool for concurrency).
 
         Returns:
             tuple: (index, generated_prompt) to preserve ordering
@@ -80,8 +79,8 @@ class GeminiBatchNode:
         try:
             # Use temporary_env_var context manager for proxy settings
             with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
-                # Call the async version of generate_content
-                response = await model_instance.generate_content_async(
+                # Call the synchronous generate_content (thread-safe)
+                response = model_instance.generate_content(
                     [prompt, pil_image],
                     generation_config=generation_config
                 )
@@ -148,12 +147,15 @@ class GeminiBatchNode:
 
         logger.info(f"Processing batch of {batch_size} images through Gemini (concurrently)")
 
-        # Create async tasks for all images
-        # Each task will return (index, prompt) to preserve order
-        async def process_all_images():
-            tasks = []
+        # Use ThreadPoolExecutor to process all images concurrently
+        # Each thread will make a blocking call to Gemini API
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+            # Submit all tasks to the thread pool
+            # Each returns a Future object
+            futures = []
             for idx, pil_image in enumerate(pil_images):
-                task = self._process_single_image(
+                future = executor.submit(
+                    self._process_single_image,
                     idx=idx,
                     pil_image=pil_image,
                     model_instance=model_instance,
@@ -163,30 +165,14 @@ class GeminiBatchNode:
                     batch_size=batch_size,
                     logger=logger,
                 )
-                tasks.append(task)
+                futures.append(future)
 
-            # Run all tasks concurrently and wait for all to complete
-            # gather() returns results in the same order as tasks were provided
-            results = await asyncio.gather(*tasks)
-            return results
-
-        # Run the async function and get results
-        # results is a list of (index, prompt) tuples
-        # Handle both cases: running event loop (ComfyUI) and no event loop
-        try:
-            # Check if we're already in an event loop
-            asyncio.get_running_loop()
-            # If we are, run in a thread pool to avoid nested loop issues
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                results = executor.submit(
-                    lambda: asyncio.run(process_all_images())
-                ).result()
-        except RuntimeError:
-            # No running event loop, safe to use asyncio.run()
-            results = asyncio.run(process_all_images())
+            # Wait for all futures to complete and collect results
+            # Each result is a tuple: (index, generated_prompt)
+            results = [future.result() for future in futures]
 
         # Sort results by index to ensure correct order
-        # (This is extra safety, but gather() should already maintain order)
+        # Even if image 8 finishes before image 5, this puts them back in order
         results.sort(key=lambda x: x[0])
 
         # Extract just the prompts in the correct order
