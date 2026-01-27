@@ -2,6 +2,7 @@ import concurrent.futures
 import logging
 import os
 import random
+import time
 
 import google.generativeai as genai
 from torch import Tensor
@@ -72,35 +73,50 @@ class GeminiBatchNode:
     ):
         """
         Process a single image synchronously (runs in thread pool for concurrency).
+        Retries up to 3 times before falling back to error message.
 
         Returns:
             tuple: (index, generated_prompt) to preserve ordering
         """
-        try:
-            # Use temporary_env_var context manager for proxy settings
-            with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
-                # Call the synchronous generate_content (thread-safe)
-                response = model_instance.generate_content(
-                    [prompt, pil_image],
-                    generation_config=generation_config
-                )
-            generated_prompt = response.text.strip()
+        max_retries = 3
+        last_error = None
 
-            # Detailed logging to debug
-            logger.info(f"Image {idx + 1}/{batch_size}:")
-            logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
-            logger.info(f"  First 150 chars: {generated_prompt[:150]}...")
-            logger.info(f"  Last 150 chars: ...{generated_prompt[-150:]}")
-            logger.debug(f"  Full prompt: {generated_prompt}")
+        for attempt in range(1, max_retries + 1):
+            try:
+                # Use temporary_env_var context manager for proxy settings
+                with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
+                    # Call the synchronous generate_content (thread-safe)
+                    response = model_instance.generate_content(
+                        [prompt, pil_image],
+                        generation_config=generation_config
+                    )
+                generated_prompt = response.text.strip()
 
-            return (idx, generated_prompt)
+                # Detailed logging to debug
+                logger.info(f"Image {idx + 1}/{batch_size} (attempt {attempt}):")
+                logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
+                logger.info(f"  First 150 chars: {generated_prompt[:150]}...")
+                logger.info(f"  Last 150 chars: ...{generated_prompt[-150:]}")
+                logger.debug(f"  Full prompt: {generated_prompt}")
 
-        except Exception as e:
-            logger.error(f"Error processing image {idx + 1}/{batch_size}: {e}", exc_info=True)
-            # Fallback to a generic prompt to maintain batch size
-            fallback_prompt = f"Error generating prompt for image {idx + 1}"
-            logger.warning(f"Using fallback prompt: {fallback_prompt}")
-            return (idx, fallback_prompt)
+                return (idx, generated_prompt)
+
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    # Not the last attempt, log and retry
+                    logger.warning(f"Image {idx + 1}/{batch_size} attempt {attempt} failed: {e}")
+                    logger.info(f"Retrying image {idx + 1}/{batch_size} (attempt {attempt + 1}/{max_retries})...")
+                    # Short delay before retry to avoid rate limiting
+                    time.sleep(0.5)
+                else:
+                    # Last attempt failed, log full error
+                    logger.error(f"Image {idx + 1}/{batch_size} failed after {max_retries} attempts: {e}", exc_info=True)
+
+        # All retries exhausted, use fallback
+        fallback_prompt = f"Error generating prompt for image {idx + 1}"
+        logger.warning(f"Using fallback prompt after {max_retries} failed attempts: {fallback_prompt}")
+        return (idx, fallback_prompt)
 
     def process_batch(
         self,
