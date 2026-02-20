@@ -227,12 +227,16 @@ class GeminiCarouselCharacterTransferNode:
                 "images": ("IMAGE",),
                 "model": (
                     [
-                        "gemini-2.5-flash",
-                        "gemini-2.5-pro",
-                        "gemini-2.0-flash-001",
-                        "gemini-3-flash",
                         "gemma-3-12b-it",
                         "gemma-3-27b-it",
+                        "gemini-3-flash-preview",
+                        "gemini-3-pro-preview",
+                        "gemini-3-flash",
+                        "gemini-3-pro",
+                        "gemini-2.0-flash-lite-001",
+                        "gemini-2.0-flash-001",
+                        "gemini-2.5-flash",
+                        "gemini-2.5-pro",
                     ],
                 ),
                 "trigger_word": ("STRING", {
