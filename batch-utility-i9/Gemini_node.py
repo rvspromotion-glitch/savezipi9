@@ -199,6 +199,327 @@ class GeminiBatchNode:
         return (prompts,)
 
 
+class GeminiCharacterTransferNode:
+    """
+    Character Transfer Node - transfers a custom character into reference image compositions.
+
+    Use case: You have reference images showing Person A, but want to generate prompts
+    for your LoRA character (Person B) in the SAME poses/outfits/settings.
+
+    Example:
+      Reference images: 4 photos of a random Instagram model
+      Your LoRA: "3lm1ra" character with specific appearance/style
+      Output: 4 prompts describing 3lm1ra in those exact poses/outfits/settings
+
+    Two-phase process:
+    1. Extract COMPOSITION from reference images (pose, outfit, setting, lighting)
+       - IGNORES the person's actual appearance
+    2. Generate prompts combining YOUR character template + extracted composition
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        seed = random.randint(1, 2**31)
+
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "model": (
+                    [
+                        "gemini-2.5-flash",
+                        "gemini-2.5-pro",
+                        "gemini-2.0-flash-001",
+                        "gemini-3-flash",
+                        "gemma-3-12b-it",
+                        "gemma-3-27b-it",
+                    ],
+                ),
+                "trigger_word": ("STRING", {
+                    "default": "3lm1ra, light-skinned woman with long straight blonde balayage hair with dark roots, grey eyes and only a little bit of freckles on cheeks.",
+                    "multiline": True
+                }),
+                "signature_features": ("STRING", {
+                    "default": "featuring sharp dark defined eyebrows, dramatic long wispy Russian-volume false lashes, full-coverage matte foundation with heavy contour, and lips heavily overlined with dark liner and high-shine glass gloss",
+                    "multiline": True
+                }),
+                "style_suffix": ("STRING", {
+                    "default": "Instagirl, kept delicate noise texture, dangerous charm, amateur cellphone quality, visible sensor noise, heavy HDR glow, amateur photo, blown-out highlight from the lamp, deeply crushed shadows.",
+                    "multiline": True
+                }),
+            },
+            "optional": {
+                "body_highlight_template": ("STRING", {
+                    "default": "explicitly highlighting her big bust, small waist, and big ass",
+                    "multiline": False
+                }),
+                "eye_highlight_template": ("STRING", {
+                    "default": "explicitly highlighting her {adjective} grey eyes",
+                    "multiline": False
+                }),
+                "custom_composition_prompt": ("STRING", {
+                    "default": "",
+                    "multiline": True
+                }),
+                "api_key": ("STRING", {}),
+                "proxy": ("STRING", {}),
+                "system_instruction": ("STRING", {}),
+                "safety_settings": (["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE"], {"default": "BLOCK_NONE"}),
+                "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "num_predict": ("INT", {"default": 1024, "min": 0, "max": 2048, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("prompts",)
+    FUNCTION = "process_character_transfer"
+    OUTPUT_IS_LIST = (True,)
+
+    CATEGORY = "Gemini/Batch"
+
+    def _extract_composition_elements(
+        self,
+        pil_images,
+        model_instance,
+        generation_config,
+        proxy: str | None,
+        custom_prompt: str,
+        logger,
+    ):
+        """
+        Phase 1: Extract composition elements from reference images.
+        IGNORES the person - only extracts pose, outfit, setting, lighting, props.
+
+        Returns:
+            str: Composition description
+        """
+        if custom_prompt:
+            extraction_prompt = custom_prompt
+        else:
+            extraction_prompt = (
+                "Analyze these reference images. Your task is to extract the COMPOSITION ELEMENTS for each image, "
+                "COMPLETELY IGNORING the person's actual appearance (face, hair color, skin tone, body type, etc.).\n\n"
+                "For EACH image separately, identify and describe:\n"
+                "1. POSE & BODY LANGUAGE: Exact body position, weight distribution, limb placement, gesture, interaction with environment\n"
+                "2. OUTFIT & CLOTHING: Specific garments, colors, patterns, textures, logos, text on clothing, accessories, jewelry\n"
+                "3. NAILS (if hands visible): Shape (coffin, stiletto, almond), finish (chrome, matte, glossy), design details\n"
+                "4. SETTING & BACKGROUND: Location, props, furniture, decorative elements, ambient details\n"
+                "5. LIGHTING: Light source type (flash, neon, sunlight), direction, intensity, shadows, highlights\n"
+                "6. MOOD & VIBE: Overall aesthetic (gritty, glamorous, casual, edgy, etc.)\n\n"
+                "Format your response as a numbered list, one entry per image:\n"
+                "Image 1: [composition description]\n"
+                "Image 2: [composition description]\n"
+                "etc.\n\n"
+                "CRITICAL: Do NOT describe the person's face, hair color, eye color, skin color, or body shape. "
+                "Only describe what they're wearing, how they're posed, where they are, and the lighting."
+            )
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
+                    content_list = [extraction_prompt] + pil_images
+                    response = model_instance.generate_content(
+                        content_list,
+                        generation_config=generation_config
+                    )
+                composition_elements = response.text.strip()
+
+                logger.info(f"Extracted composition elements (attempt {attempt}):")
+                logger.info(f"  {composition_elements[:500]}...")
+
+                return composition_elements
+
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"Composition extraction attempt {attempt} failed: {e}")
+                    logger.info(f"Retrying (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(0.5)
+                else:
+                    logger.error(f"Composition extraction failed after {max_retries} attempts: {e}", exc_info=True)
+                    return "Image 1: standing pose, casual outfit, neutral background, soft lighting"
+
+    def _generate_character_prompt(
+        self,
+        idx: int,
+        pil_image,
+        composition_desc: str,
+        trigger_word: str,
+        signature_features: str,
+        body_highlight: str,
+        eye_highlight: str,
+        style_suffix: str,
+        model_instance,
+        generation_config,
+        proxy: str | None,
+        batch_size: int,
+        logger,
+    ):
+        """
+        Phase 2: Generate final prompt combining character template + composition.
+        Retries up to 3 times before falling back to error message.
+
+        Returns:
+            tuple: (index, generated_prompt) to preserve ordering
+        """
+        # Extract this image's specific composition from the batch description
+        # Parse "Image N:" pattern
+        lines = composition_desc.split('\n')
+        this_image_composition = ""
+        for line in lines:
+            if line.strip().startswith(f"Image {idx + 1}:"):
+                this_image_composition = line.split(':', 1)[1].strip()
+                break
+
+        if not this_image_composition:
+            this_image_composition = "standing in a neutral pose, wearing casual clothing, neutral background"
+
+        generation_prompt = (
+            f"You are a professional prompt engineer for Flux/Stable Diffusion.\n\n"
+            f"CHARACTER TEMPLATE (use this EXACTLY):\n"
+            f"Trigger: {trigger_word}\n"
+            f"Signature Features: {signature_features}\n"
+            f"Body Highlight (use if body visible): {body_highlight}\n"
+            f"Eye Highlight (use if eyes visible): {eye_highlight}\n"
+            f"Style Suffix: {style_suffix}\n\n"
+            f"COMPOSITION from reference image:\n"
+            f"{this_image_composition}\n\n"
+            f"Your task:\n"
+            f"1. Analyze this reference image to understand the exact pose, outfit details, setting, and lighting\n"
+            f"2. Generate a detailed Flux/SD prompt that describes the CHARACTER TEMPLATE in THIS composition\n"
+            f"3. Start with the trigger word, include signature features, add body/eye highlights if applicable\n"
+            f"4. Describe the outfit, pose, setting, and lighting from the reference image in detail\n"
+            f"5. Include specific details: text on clothing, brand logos, nail design, props, lighting physics\n"
+            f"6. End with the style suffix\n\n"
+            f"Output ONLY the final prompt - no explanations, no metadata, just the prompt text."
+        )
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
+                    response = model_instance.generate_content(
+                        [generation_prompt, pil_image],
+                        generation_config=generation_config
+                    )
+                generated_prompt = response.text.strip()
+
+                logger.info(f"Image {idx + 1}/{batch_size} (attempt {attempt}):")
+                logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
+                logger.info(f"  First 200 chars: {generated_prompt[:200]}...")
+
+                return (idx, generated_prompt)
+
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"Image {idx + 1}/{batch_size} attempt {attempt} failed: {e}")
+                    logger.info(f"Retrying image {idx + 1}/{batch_size} (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(0.5)
+                else:
+                    logger.error(f"Image {idx + 1}/{batch_size} failed after {max_retries} attempts: {e}", exc_info=True)
+
+        fallback_prompt = f"{trigger_word} {this_image_composition}, {signature_features}, {style_suffix}"
+        logger.warning(f"Using fallback prompt for image {idx + 1}")
+        return (idx, fallback_prompt)
+
+    def process_character_transfer(
+        self,
+        images: Tensor,
+        model: str,
+        trigger_word: str,
+        signature_features: str,
+        style_suffix: str,
+        body_highlight_template: str = "explicitly highlighting her big bust, small waist, and big ass",
+        eye_highlight_template: str = "explicitly highlighting her {adjective} grey eyes",
+        custom_composition_prompt: str = "",
+        api_key: str | None = None,
+        proxy: str | None = None,
+        system_instruction: str | None = None,
+        safety_settings: str = "BLOCK_NONE",
+        temperature: float = 0.7,
+        num_predict: int = 1024,
+    ):
+        """
+        Process batch of reference images and transfer them to your custom character.
+        """
+
+        logger = logging.getLogger("ComfyUI-Gemini-CharacterTransfer")
+
+        # Configure API
+        if "GOOGLE_API_KEY" in os.environ and not api_key:
+            genai.configure(transport="rest")
+        else:
+            genai.configure(api_key=api_key, transport="rest")
+
+        # Initialize model
+        model_instance = genai.GenerativeModel(
+            model,
+            safety_settings=safety_settings,
+            system_instruction=system_instruction if system_instruction else None
+        )
+
+        # Configure generation
+        generation_config = genai.GenerationConfig(
+            response_mime_type="text/plain",
+            temperature=temperature,
+        )
+        if num_predict > 0:
+            generation_config.max_output_tokens = num_predict
+
+        # Convert batch tensor to list of PIL images
+        pil_images = images_to_pillow(images)
+        batch_size = len(pil_images)
+
+        logger.info(f"Processing character transfer for {batch_size} reference images")
+        logger.info(f"Character: {trigger_word[:50]}...")
+
+        # PHASE 1: Extract composition elements from ALL reference images
+        logger.info("Phase 1: Extracting composition elements (pose, outfit, setting, lighting)...")
+        composition_elements = self._extract_composition_elements(
+            pil_images,
+            model_instance,
+            generation_config,
+            proxy,
+            custom_composition_prompt,
+            logger,
+        )
+
+        # PHASE 2: Generate character-specific prompts for each image
+        logger.info(f"Phase 2: Generating {batch_size} character transfer prompts...")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+            futures = []
+            for idx, pil_image in enumerate(pil_images):
+                future = executor.submit(
+                    self._generate_character_prompt,
+                    idx=idx,
+                    pil_image=pil_image,
+                    composition_desc=composition_elements,
+                    trigger_word=trigger_word,
+                    signature_features=signature_features,
+                    body_highlight=body_highlight_template,
+                    eye_highlight=eye_highlight_template,
+                    style_suffix=style_suffix,
+                    model_instance=model_instance,
+                    generation_config=generation_config,
+                    proxy=proxy,
+                    batch_size=batch_size,
+                    logger=logger,
+                )
+                futures.append(future)
+
+            results = [future.result() for future in futures]
+
+        # Sort results by index to ensure correct order
+        results.sort(key=lambda x: x[0])
+
+        # Extract just the prompts in the correct order
+        prompts = [prompt_text for idx, prompt_text in results]
+
+        logger.info(f"Successfully generated {len(prompts)} character transfer prompts")
+        logger.info(f"Prompt lengths: {[len(p) for p in prompts]}")
+        return (prompts,)
+
+
 class GeminiCarouselBatchNode:
     """
     Processes a batch of images showing the same subject in different settings,
@@ -565,10 +886,12 @@ NODE_CLASS_MAPPINGS = {
     "Ask_Gemini": GeminiNode,
     "Ask_Gemini_Batch": GeminiBatchNode,
     "Ask_Gemini_Carousel_Batch": GeminiCarouselBatchNode,
+    "Ask_Gemini_Character_Transfer": GeminiCharacterTransferNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Ask_Gemini": "Ask Gemini",
     "Ask_Gemini_Batch": "Ask Gemini (Batch)",
     "Ask_Gemini_Carousel_Batch": "Ask Gemini (Carousel Batch)",
+    "Ask_Gemini_Character_Transfer": "Ask Gemini (Character Transfer)",
 }
