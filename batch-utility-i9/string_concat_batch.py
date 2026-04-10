@@ -70,6 +70,14 @@ class StringConcatBatch:
         suffix    : str        – appended  to every prompt
         separator : str        – glue inserted between non-empty parts
         """
+        # ComfyUI may wrap widget values in a list when INPUT_IS_LIST is active
+        if isinstance(prefix, list):
+            prefix = prefix[0] if prefix else ""
+        if isinstance(suffix, list):
+            suffix = suffix[0] if suffix else ""
+        if isinstance(separator, list):
+            separator = separator[0] if separator else ", "
+
         prefix    = prefix    or ""
         suffix    = suffix    or ""
         separator = separator if separator is not None else ", "
