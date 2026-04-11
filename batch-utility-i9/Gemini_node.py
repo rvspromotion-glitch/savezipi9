@@ -566,6 +566,175 @@ class GeminiCarouselCharacterTransferNode:
         return (prompts,)
 
 
+class GeminiDatasetBatchNode:
+    """
+    Like Ask Gemini (Batch) but sends requests one at a time with a
+    configurable delay between each call.
+
+    Use this instead of Ask Gemini (Batch) when you are hitting rate limits
+    (429 errors) or when building large datasets where caption quality matters
+    more than speed.
+
+    request_interval – seconds to wait AFTER each successful request before
+    sending the next one.  Start at 3 s for the free tier (15 RPM limit).
+    Paid API keys can go lower (0.5 s is usually fine).
+    """
+
+    _MODEL_LIST = [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemma-3-27b-it",
+        "gemma-3-12b-it",
+        "gemini-2.0-flash-001",
+        "gemini-2.0-flash-lite-001",
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        seed = random.randint(1, 2**31)
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "prompt": ("STRING", {
+                    "default": "Describe this image in detail for use as an image generation prompt.",
+                    "multiline": True,
+                }),
+                "safety_settings": (["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE"],),
+                "response_type": (["text", "json"],),
+                "model": (cls._MODEL_LIST,),
+                "request_interval": ("FLOAT", {
+                    "default": 3.0,
+                    "min": 0.0,
+                    "max": 120.0,
+                    "step": 0.5,
+                    "tooltip": (
+                        "Seconds to wait between each API request. "
+                        "Free tier: 3 s (15 RPM limit). "
+                        "Paid tier: 0.5–1 s is usually fine."
+                    ),
+                }),
+            },
+            "optional": {
+                "api_key": ("STRING", {}),
+                "proxy": ("STRING", {}),
+                "system_instruction": ("STRING", {}),
+                "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
+                "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "num_predict": ("INT", {"default": 512, "min": 0, "max": 1048576, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("prompts",)
+    FUNCTION = "process_batch"
+    OUTPUT_IS_LIST = (True,)
+    CATEGORY = "Gemini/Batch"
+
+    # ------------------------------------------------------------------ #
+
+    def _call_once(self, idx, pil_image, model_instance, prompt,
+                   generation_config, proxy, batch_size, logger):
+        """Single image → single caption, with up to 3 retries."""
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                with temporary_env_var("HTTP_PROXY", proxy), \
+                     temporary_env_var("HTTPS_PROXY", proxy):
+                    response = model_instance.generate_content(
+                        [prompt, pil_image],
+                        generation_config=generation_config,
+                    )
+                caption = response.text.strip()
+                logger.info(
+                    f"[{idx + 1}/{batch_size}] OK – {len(caption)} chars  "
+                    f"| {caption[:100]}…"
+                )
+                return caption
+            except Exception as exc:
+                logger.warning(
+                    f"[{idx + 1}/{batch_size}] attempt {attempt} failed: {exc}"
+                )
+                if attempt < max_retries:
+                    time.sleep(1.0)   # short back-off before retry
+                else:
+                    logger.error(
+                        f"[{idx + 1}/{batch_size}] giving up after "
+                        f"{max_retries} attempts"
+                    )
+                    return f"Error generating caption for image {idx + 1}"
+
+    # ------------------------------------------------------------------ #
+
+    def process_batch(
+        self,
+        images,
+        prompt: str,
+        safety_settings: str,
+        response_type: str,
+        model: str,
+        request_interval: float = 3.0,
+        api_key=None,
+        proxy=None,
+        system_instruction=None,
+        seed=None,
+        temperature: float = 0.7,
+        num_predict: int = 512,
+    ):
+        logger = logging.getLogger("ComfyUI-Gemini-Dataset-Batch")
+
+        # Configure API
+        if "GOOGLE_API_KEY" in os.environ and not api_key:
+            genai.configure(transport="rest")
+        else:
+            genai.configure(api_key=api_key, transport="rest")
+
+        model_instance = genai.GenerativeModel(
+            model,
+            safety_settings=safety_settings,
+            system_instruction=system_instruction if system_instruction else None,
+        )
+
+        generation_config = genai.GenerationConfig(
+            response_mime_type=(
+                "application/json" if response_type == "json" else "text/plain"
+            ),
+            temperature=temperature,
+        )
+        if num_predict > 0:
+            generation_config.max_output_tokens = num_predict
+
+        pil_images = images_to_pillow(images)
+        batch_size  = len(pil_images)
+
+        logger.info(
+            f"Dataset batch: {batch_size} images, "
+            f"{request_interval}s interval between requests"
+        )
+
+        captions = []
+        for idx, pil_image in enumerate(pil_images):
+            caption = self._call_once(
+                idx, pil_image, model_instance, prompt,
+                generation_config, proxy, batch_size, logger,
+            )
+            captions.append(caption)
+
+            # Sleep AFTER each request except the last
+            if idx < batch_size - 1 and request_interval > 0:
+                logger.info(
+                    f"Waiting {request_interval}s before next request "
+                    f"({idx + 2}/{batch_size})…"
+                )
+                time.sleep(request_interval)
+
+        logger.info(f"✓ Generated {len(captions)} captions")
+        return (captions,)
+
+
 # Keep original single-image node for compatibility
 class GeminiNode:
     @classmethod
@@ -670,11 +839,13 @@ class GeminiNode:
 NODE_CLASS_MAPPINGS = {
     "Ask_Gemini": GeminiNode,
     "Ask_Gemini_Batch": GeminiBatchNode,
+    "Ask_Gemini_Dataset_Batch": GeminiDatasetBatchNode,
     "Ask_Gemini_Carousel_Character_Transfer": GeminiCarouselCharacterTransferNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Ask_Gemini": "Ask Gemini",
     "Ask_Gemini_Batch": "Ask Gemini (Batch)",
+    "Ask_Gemini_Dataset_Batch": "Ask Gemini (Dataset Batch)",
     "Ask_Gemini_Carousel_Character_Transfer": "Ask Gemini (Carousel + Character Transfer)",
 }
