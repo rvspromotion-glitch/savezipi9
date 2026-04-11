@@ -617,6 +617,18 @@ class GeminiDatasetBatchNode:
                         "Paid tier: 0.5–1 s is usually fine."
                     ),
                 }),
+                "min_chars": ("INT", {
+                    "default": 150,
+                    "min": 0,
+                    "max": 5000,
+                    "step": 25,
+                    "tooltip": (
+                        "Minimum acceptable caption length in characters. "
+                        "If Gemini returns fewer characters it will retry "
+                        "with an explicit length instruction appended. "
+                        "Set to 0 to disable the check."
+                    ),
+                }),
             },
             "optional": {
                 "api_key": ("STRING", {}),
@@ -637,34 +649,76 @@ class GeminiDatasetBatchNode:
     # ------------------------------------------------------------------ #
 
     def _call_once(self, idx, pil_image, model_instance, prompt,
-                   generation_config, proxy, batch_size, logger):
-        """Single image → single caption, with up to 3 retries."""
+                   generation_config, proxy, batch_size, logger, min_chars=0):
+        """
+        Single image → single caption.
+
+        Retries up to 3 times total.  On a retry caused by a too-short
+        response the prompt is augmented with an explicit length requirement
+        so Gemini understands it needs to write more.
+        """
         max_retries = 3
+        last_caption = None
+
         for attempt in range(1, max_retries + 1):
+            # On retries for short output: inject length requirement
+            if attempt > 1 and min_chars > 0 and last_caption is not None:
+                active_prompt = (
+                    f"{prompt}\n\n"
+                    f"IMPORTANT: Your previous response was only "
+                    f"{len(last_caption)} characters, which is too short. "
+                    f"Write a thorough, detailed description of at least "
+                    f"{min_chars} characters. Do not truncate."
+                )
+            else:
+                active_prompt = prompt
+
             try:
                 with temporary_env_var("HTTP_PROXY", proxy), \
                      temporary_env_var("HTTPS_PROXY", proxy):
                     response = model_instance.generate_content(
-                        [prompt, pil_image],
+                        [active_prompt, pil_image],
                         generation_config=generation_config,
                     )
                 caption = response.text.strip()
+
+                # Enforce minimum length
+                if min_chars > 0 and len(caption) < min_chars:
+                    last_caption = caption
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"[{idx + 1}/{batch_size}] too short "
+                            f"({len(caption)} < {min_chars} chars) – "
+                            f"retrying (attempt {attempt + 1}/{max_retries})…"
+                        )
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        logger.warning(
+                            f"[{idx + 1}/{batch_size}] still short after "
+                            f"{max_retries} attempts ({len(caption)} chars) – "
+                            f"keeping best result"
+                        )
+
                 logger.info(
                     f"[{idx + 1}/{batch_size}] OK – {len(caption)} chars  "
                     f"| {caption[:100]}…"
                 )
                 return caption
+
             except Exception as exc:
                 logger.warning(
                     f"[{idx + 1}/{batch_size}] attempt {attempt} failed: {exc}"
                 )
                 if attempt < max_retries:
-                    time.sleep(1.0)   # short back-off before retry
+                    time.sleep(1.0)
                 else:
                     logger.error(
                         f"[{idx + 1}/{batch_size}] giving up after "
                         f"{max_retries} attempts"
                     )
+                    if last_caption:
+                        return last_caption   # return best effort
                     return f"Error generating caption for image {idx + 1}"
 
     # ------------------------------------------------------------------ #
@@ -677,6 +731,7 @@ class GeminiDatasetBatchNode:
         response_type: str,
         model: str,
         request_interval: float = 3.0,
+        min_chars: int = 150,
         api_key=None,
         proxy=None,
         system_instruction=None,
@@ -712,7 +767,8 @@ class GeminiDatasetBatchNode:
 
         logger.info(
             f"Dataset batch: {batch_size} images, "
-            f"{request_interval}s interval between requests"
+            f"{request_interval}s interval, "
+            f"min_chars={min_chars}"
         )
 
         captions = []
@@ -720,6 +776,7 @@ class GeminiDatasetBatchNode:
             caption = self._call_once(
                 idx, pil_image, model_instance, prompt,
                 generation_config, proxy, batch_size, logger,
+                min_chars=min_chars,
             )
             captions.append(caption)
 
