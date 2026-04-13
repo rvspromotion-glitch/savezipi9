@@ -617,6 +617,18 @@ class GeminiDatasetBatchNode:
                         "Paid tier: 0.5–1 s is usually fine."
                     ),
                 }),
+                "min_chars": ("INT", {
+                    "default": 150,
+                    "min": 0,
+                    "max": 5000,
+                    "step": 25,
+                    "tooltip": (
+                        "Minimum acceptable caption length in characters. "
+                        "If Gemini returns fewer characters it will retry "
+                        "with an explicit length instruction appended. "
+                        "Set to 0 to disable the check."
+                    ),
+                }),
             },
             "optional": {
                 "api_key": ("STRING", {}),
@@ -624,7 +636,18 @@ class GeminiDatasetBatchNode:
                 "system_instruction": ("STRING", {}),
                 "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
-                "num_predict": ("INT", {"default": 512, "min": 0, "max": 1048576, "step": 1}),
+                "num_predict": ("INT", {
+                    "default": 1024,
+                    "min": 0,
+                    "max": 1048576,
+                    "step": 64,
+                    "tooltip": (
+                        "Max output tokens. 0 = unlimited. "
+                        "If captions are cut off mid-sentence, raise this value. "
+                        "512 is often too low; 1024 is a safe default for "
+                        "detailed captions."
+                    ),
+                }),
             },
         }
 
@@ -636,35 +659,108 @@ class GeminiDatasetBatchNode:
 
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _is_max_tokens(response) -> bool:
+        """Return True when Gemini cut the response off at the token limit."""
+        try:
+            fr = response.candidates[0].finish_reason
+            # The SDK exposes finish_reason as either an int or an enum.
+            # Value 2 / name "MAX_TOKENS" means the output was truncated.
+            return str(fr) in ("2", "MAX_TOKENS") or (
+                hasattr(fr, "name") and fr.name == "MAX_TOKENS"
+            )
+        except (IndexError, AttributeError):
+            return False
+
     def _call_once(self, idx, pil_image, model_instance, prompt,
-                   generation_config, proxy, batch_size, logger):
-        """Single image → single caption, with up to 3 retries."""
+                   generation_config, proxy, batch_size, logger, min_chars=0):
+        """
+        Single image → single caption.
+
+        Handles two distinct failure modes:
+          1. MAX_TOKENS  – response was literally cut off mid-sentence because
+                           num_predict is too low.  Logged clearly so the user
+                           knows to raise the value.
+          2. Too short   – response finished naturally but is under min_chars.
+                           Retried with an explicit length instruction appended.
+        """
         max_retries = 3
+        last_caption = None
+
         for attempt in range(1, max_retries + 1):
+            # On length-retry: tell the model it was too short
+            if attempt > 1 and min_chars > 0 and last_caption is not None:
+                active_prompt = (
+                    f"{prompt}\n\n"
+                    f"IMPORTANT: Your previous response was only "
+                    f"{len(last_caption)} characters and appears incomplete. "
+                    f"Write a complete, detailed description of at least "
+                    f"{min_chars} characters. Do not stop early."
+                )
+            else:
+                active_prompt = prompt
+
             try:
                 with temporary_env_var("HTTP_PROXY", proxy), \
                      temporary_env_var("HTTPS_PROXY", proxy):
                     response = model_instance.generate_content(
-                        [prompt, pil_image],
+                        [active_prompt, pil_image],
                         generation_config=generation_config,
                     )
+
                 caption = response.text.strip()
+
+                # ── Check for MAX_TOKENS truncation ───────────────────────
+                if self._is_max_tokens(response):
+                    logger.warning(
+                        f"[{idx + 1}/{batch_size}] ⚠ MAX_TOKENS hit – "
+                        f"caption cut off at {len(caption)} chars. "
+                        f"Raise num_predict (currently "
+                        f"{generation_config.max_output_tokens or 'default'}) "
+                        f"to fix mid-sentence truncation."
+                    )
+                    last_caption = caption
+                    if attempt < max_retries:
+                        time.sleep(0.5)
+                        continue
+
+                # ── Check minimum length ──────────────────────────────────
+                if min_chars > 0 and len(caption) < min_chars:
+                    last_caption = caption
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"[{idx + 1}/{batch_size}] too short "
+                            f"({len(caption)} < {min_chars} chars) – "
+                            f"retrying (attempt {attempt + 1}/{max_retries})…"
+                        )
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        logger.warning(
+                            f"[{idx + 1}/{batch_size}] still short after "
+                            f"{max_retries} attempts ({len(caption)} chars) – "
+                            f"keeping best result"
+                        )
+
                 logger.info(
                     f"[{idx + 1}/{batch_size}] OK – {len(caption)} chars  "
                     f"| {caption[:100]}…"
                 )
                 return caption
+
             except Exception as exc:
                 logger.warning(
                     f"[{idx + 1}/{batch_size}] attempt {attempt} failed: {exc}"
                 )
                 if attempt < max_retries:
-                    time.sleep(1.0)   # short back-off before retry
+                    time.sleep(1.0)
                 else:
                     logger.error(
                         f"[{idx + 1}/{batch_size}] giving up after "
                         f"{max_retries} attempts"
                     )
+                    if last_caption:
+                        return last_caption
                     return f"Error generating caption for image {idx + 1}"
 
     # ------------------------------------------------------------------ #
@@ -677,6 +773,7 @@ class GeminiDatasetBatchNode:
         response_type: str,
         model: str,
         request_interval: float = 3.0,
+        min_chars: int = 150,
         api_key=None,
         proxy=None,
         system_instruction=None,
@@ -712,7 +809,8 @@ class GeminiDatasetBatchNode:
 
         logger.info(
             f"Dataset batch: {batch_size} images, "
-            f"{request_interval}s interval between requests"
+            f"{request_interval}s interval, "
+            f"min_chars={min_chars}"
         )
 
         captions = []
@@ -720,6 +818,7 @@ class GeminiDatasetBatchNode:
             caption = self._call_once(
                 idx, pil_image, model_instance, prompt,
                 generation_config, proxy, batch_size, logger,
+                min_chars=min_chars,
             )
             captions.append(caption)
 
