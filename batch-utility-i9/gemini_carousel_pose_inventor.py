@@ -5,8 +5,7 @@ Stage 2 of the creative pipeline.  Takes the moodboard analysis from
 GeminiMoodboardAnalyzer and a single reference image, then asks Gemini to
 invent N distinct pose sets for a carousel shoot.
 
-Each pose set uses a strict three-line format that maps directly onto a Flux
-prompt structure:
+Each pose set uses a strict three-line format:
 
     [POSE] ...
     [EXPRESSION] ...
@@ -18,20 +17,14 @@ inferred from the reference image and locked so all poses stay plausible.
 
 Outputs
 -------
-pose_sets_json : STRING  — JSON array, one element per pose set
-pose_sets_raw  : STRING  — same content joined by  ---  (for debugging /
-                           connecting to a text node directly)
-
-Intended workflow
------------------
-GeminiMoodboardAnalyzer ──► moodboard_analysis ──►┐
-                                                    ├──► GeminiCarouselPoseInventor
-Ref Image ──────────────────────────────────────►──┘
+pose_sets      : STRING list  — one string per pose set (OUTPUT_IS_LIST)
+                               feeds directly into StringConcatBatch / CLIPTextEncodeBatch
+pose_sets_raw  : STRING       — all pose sets joined by --- (debug / text preview)
 """
 
 import json
 import logging
-import os
+import random
 import re
 import time
 
@@ -90,12 +83,10 @@ Each pose set must use EXACTLY this three-line format:
 
 def _parse_pose_sets(raw_text: str, expected_count: int) -> list[str]:
     """
-    Parse Gemini's response into a list of pose-set strings.
-
-    Splits on `---` dividers (with or without surrounding whitespace / extra
-    dashes) and validates that each block contains all three required tags.
+    Split Gemini's response into individual pose-set strings.
+    Accepts ---, ----, — etc. as separators and validates that each block
+    contains all three required tags.
     """
-    # Normalise separator variations (---, -----, — etc.)
     normalised = re.sub(r"\n[-—]{2,}\n", "\n---\n", raw_text)
     blocks = [b.strip() for b in normalised.split("---") if b.strip()]
 
@@ -110,8 +101,7 @@ def _parse_pose_sets(raw_text: str, expected_count: int) -> list[str]:
 
     if len(valid) < expected_count:
         logger.warning(
-            f"Expected {expected_count} pose sets but only parsed {len(valid)}; "
-            "using what we got"
+            f"Expected {expected_count} pose sets but parsed {len(valid)}"
         )
 
     return valid
@@ -119,47 +109,49 @@ def _parse_pose_sets(raw_text: str, expected_count: int) -> list[str]:
 
 class GeminiCarouselPoseInventor:
     """
-    Invents N pose sets for a photo carousel using the moodboard analysis from
-    GeminiMoodboardAnalyzer and a reference image that locks the shooting context.
+    Invents N pose sets for a photo carousel.
+    Output pose_sets is a STRING list (one element per pose set) compatible
+    with StringConcatBatch and CLIPTextEncodeBatch.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
+        seed = random.randint(1, 2**31)
         return {
             "required": {
-                "ref_image":           ("IMAGE",),
-                "moodboard_analysis":  ("STRING", {
+                "ref_image":          ("IMAGE",),
+                "moodboard_analysis": ("STRING", {
                     "multiline": True,
                     "default":   "",
-                    "tooltip":   "Paste the output of GeminiMoodboardAnalyzer here.",
+                    "tooltip":   "Connect the output of GeminiMoodboardAnalyzer here.",
                 }),
                 "pose_count": ("INT", {
-                    "default": 6,
-                    "min":     1,
-                    "max":     15,
-                    "step":    1,
-                    "tooltip": "Number of distinct pose sets to invent.",
+                    "default": 6, "min": 1, "max": 15, "step": 1,
                 }),
-                "model": (_MODEL_LIST,),
+                "model":   (_MODEL_LIST,),
+                "api_key": ("STRING", {"default": ""}),
+                "seed":    ("INT", {
+                    "default": seed, "min": 0, "max": 2**31, "step": 1,
+                }),
             },
             "optional": {
-                "gemini_api_key": ("STRING", {
-                    "default":   "",
-                    "multiline": False,
-                    "tooltip":   "Falls back to GEMINI_API_KEY / GOOGLE_API_KEY env var if empty.",
-                }),
                 "safety_settings": (
                     ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE"],
                     {"default": "BLOCK_NONE"},
                 ),
+                "temperature": ("FLOAT", {
+                    "default": 0.9, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "Higher = more creative pose variety.",
+                }),
                 "proxy": ("STRING", {"default": ""}),
             },
         }
 
     RETURN_TYPES  = ("STRING", "STRING")
-    RETURN_NAMES  = ("pose_sets_json", "pose_sets_raw")
+    RETURN_NAMES  = ("pose_sets", "pose_sets_raw")
     FUNCTION      = "invent_poses"
     CATEGORY      = "Gemini/Creative"
+    OUTPUT_IS_LIST = (True, False)   # pose_sets → list; pose_sets_raw → single string
 
     # ------------------------------------------------------------------
 
@@ -169,33 +161,33 @@ class GeminiCarouselPoseInventor:
         moodboard_analysis: str,
         pose_count: int = 6,
         model: str = "gemini-2.5-flash",
-        gemini_api_key: str = "",
+        api_key: str = "",
+        seed: int = 0,
         safety_settings: str = "BLOCK_NONE",
+        temperature: float = 0.9,
         proxy: str = "",
     ) -> tuple:
         # Defensive unwrap
-        if isinstance(gemini_api_key, list):
-            gemini_api_key = gemini_api_key[0] if gemini_api_key else ""
+        if isinstance(api_key, list):
+            api_key = api_key[0] if api_key else ""
         if isinstance(moodboard_analysis, list):
             moodboard_analysis = moodboard_analysis[0] if moodboard_analysis else ""
         if isinstance(pose_count, list):
             pose_count = pose_count[0] if pose_count else 6
+        if isinstance(seed, list):
+            seed = seed[0] if seed else 0
         if isinstance(safety_settings, list):
             safety_settings = safety_settings[0] if safety_settings else "BLOCK_NONE"
+        if isinstance(temperature, list):
+            temperature = temperature[0] if temperature else 0.9
         if isinstance(proxy, list):
             proxy = proxy[0] if proxy else ""
 
-        gemini_api_key = gemini_api_key.strip()
-        proxy          = proxy.strip() or None
+        api_key = (api_key or "").strip()
+        proxy   = (proxy   or "").strip() or None
 
-        # Resolve API key
-        effective_key = (
-            gemini_api_key
-            or os.environ.get("GEMINI_API_KEY", "")
-            or os.environ.get("GOOGLE_API_KEY", "")
-        )
-        if effective_key:
-            genai.configure(api_key=effective_key, transport="rest")
+        if api_key:
+            genai.configure(api_key=api_key, transport="rest")
         else:
             genai.configure(transport="rest")
 
@@ -203,13 +195,17 @@ class GeminiCarouselPoseInventor:
             model,
             safety_settings=safety_settings,
         )
-        generation_config = genai.GenerationConfig(
+
+        cfg_kwargs = dict(
             response_mime_type="text/plain",
-            temperature=0.9,   # higher → more creative pose variety
+            temperature=temperature,
             max_output_tokens=4096,
         )
+        try:
+            generation_config = genai.GenerationConfig(**cfg_kwargs, seed=seed)
+        except TypeError:
+            generation_config = genai.GenerationConfig(**cfg_kwargs)
 
-        # Use only the first frame as reference (or all if it's a small batch)
         pil_images = images_to_pillow(ref_image)
         ref_pil    = pil_images[0]
 
@@ -220,7 +216,7 @@ class GeminiCarouselPoseInventor:
 
         logger.info(
             f"Inventing {pose_count} pose sets via {model} "
-            f"(ref image {ref_pil.width}×{ref_pil.height})"
+            f"(seed={seed}, ref {ref_pil.width}×{ref_pil.height})"
         )
 
         max_retries = 3
@@ -228,29 +224,22 @@ class GeminiCarouselPoseInventor:
 
         for attempt in range(1, max_retries + 1):
             try:
-                content = [prompt, ref_pil]
                 with temporary_env_var("HTTP_PROXY", proxy), \
                      temporary_env_var("HTTPS_PROXY", proxy):
                     response = model_instance.generate_content(
-                        content,
+                        [prompt, ref_pil],
                         generation_config=generation_config,
                     )
-                raw_text = response.text.strip()
-                logger.info(
-                    f"✓ Raw response: {len(raw_text)} chars (attempt {attempt})"
-                )
-
+                raw_text  = response.text.strip()
                 pose_sets = _parse_pose_sets(raw_text, pose_count)
+                raw_out   = "\n---\n".join(pose_sets)
 
-                pose_sets_json = json.dumps(pose_sets, ensure_ascii=False, indent=2)
-                pose_sets_raw  = "\n---\n".join(pose_sets)
-
-                logger.info(f"✓ Parsed {len(pose_sets)} pose sets")
+                logger.info(f"✓ Parsed {len(pose_sets)} pose sets (attempt {attempt})")
                 for i, ps in enumerate(pose_sets):
-                    preview = ps.replace("\n", " | ")[:120]
-                    logger.debug(f"  [{i + 1}] {preview}")
+                    logger.debug(f"  [{i+1}] {ps[:80].replace(chr(10),' | ')}")
 
-                return (pose_sets_json, pose_sets_raw)
+                # pose_sets is a Python list → OUTPUT_IS_LIST unpacks it downstream
+                return (pose_sets, raw_out)
 
             except Exception as exc:
                 last_error = exc
@@ -259,11 +248,8 @@ class GeminiCarouselPoseInventor:
                     time.sleep(1.5)
 
         logger.error(f"All {max_retries} attempts failed: {last_error}", exc_info=True)
-        fallback_json = json.dumps(
-            [f"[Error] Failed to generate pose sets: {last_error}"],
-            ensure_ascii=False,
-        )
-        return (fallback_json, str(last_error))
+        fallback = [f"[Error] {last_error}"]
+        return (fallback, str(last_error))
 
 
 # ---------------------------------------------------------------------------
