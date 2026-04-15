@@ -103,6 +103,12 @@ class HumanReviewNode:
         if isinstance(selected_indices, list):
             selected_indices = selected_indices[0] if selected_indices else ""
 
+        # Collapse list-of-tensors into a single batch tensor.
+        # Upstream nodes with OUTPUT_IS_LIST=True send one tensor per call
+        # unless we collect them first.
+        if isinstance(images, (list, tuple)):
+            images = torch.cat(images, dim=0)
+
         # ── Passthrough mode ──────────────────────────────────────────────
         if not enabled:
             return (images,)
