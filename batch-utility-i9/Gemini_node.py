@@ -23,7 +23,7 @@ class GeminiBatchNode:
             "required": {
                 "images": ("IMAGE",),  # Batch of images
                 "prompt": ("STRING", {
-                    "default": "Describe this image in detail for use as an image generation prompt.",
+                    "default": "Describe this image in detail for use as an image generation prompt.", 
                     "multiline": True
                 }),
                 "safety_settings": (["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE"],),
@@ -42,12 +42,12 @@ class GeminiBatchNode:
                         "gemini-2.0-flash-lite-001",
                     ],
                 ),
-                "api_key": ("STRING", {"default": ""}),
-                "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
             },
             "optional": {
+                "api_key": ("STRING", {}),
                 "proxy": ("STRING", {}),
                 "system_instruction": ("STRING", {}),
+                "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "num_predict": ("INT", {"default": 512, "min": 0, "max": 1048576, "step": 1}),
             },
@@ -150,17 +150,13 @@ class GeminiBatchNode:
         )
         
         # Configure generation
-        cfg_kwargs = dict(
+        generation_config = genai.GenerationConfig(
             response_mime_type="application/json" if response_type == "json" else "text/plain",
             temperature=temperature,
         )
         if num_predict > 0:
-            cfg_kwargs["max_output_tokens"] = num_predict
-        try:
-            generation_config = genai.GenerationConfig(**cfg_kwargs, seed=seed)
-        except TypeError:
-            generation_config = genai.GenerationConfig(**cfg_kwargs)
-
+            generation_config.max_output_tokens = num_predict
+        
         # Convert batch tensor to list of PIL images
         pil_images = images_to_pillow(images)
         batch_size = len(pil_images)
@@ -226,7 +222,6 @@ class GeminiCarouselCharacterTransferNode:
 
     @classmethod
     def INPUT_TYPES(cls):
-        seed = random.randint(1, 2**31)
         return {
             "required": {
                 "images": ("IMAGE",),
@@ -256,8 +251,6 @@ class GeminiCarouselCharacterTransferNode:
                     "default": "Instagirl, kept delicate noise texture, dangerous charm, amateur cellphone quality, visible sensor noise, heavy HDR glow, amateur photo, blown-out highlight from the lamp, deeply crushed shadows.",
                     "multiline": True
                 }),
-                "api_key": ("STRING", {"default": ""}),
-                "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
             },
             "optional": {
                 "body_highlight_template": ("STRING", {
@@ -268,6 +261,7 @@ class GeminiCarouselCharacterTransferNode:
                     "default": "explicitly highlighting her {adjective} grey eyes",
                     "multiline": False
                 }),
+                "api_key": ("STRING", {}),
                 "proxy": ("STRING", {}),
                 "system_instruction": ("STRING", {}),
                 "safety_settings": (["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE"], {"default": "BLOCK_NONE"}),
@@ -472,10 +466,9 @@ class GeminiCarouselCharacterTransferNode:
         trigger_word: str,
         signature_features: str,
         style_suffix: str,
-        api_key: str = "",
-        seed: int = 0,
         body_highlight_template: str = "explicitly highlighting her big bust, small waist, and big ass",
         eye_highlight_template: str = "explicitly highlighting her {adjective} grey eyes",
+        api_key: str | None = None,
         proxy: str | None = None,
         system_instruction: str | None = None,
         safety_settings: str = "BLOCK_NONE",
@@ -502,13 +495,12 @@ class GeminiCarouselCharacterTransferNode:
         )
 
         # Configure generation
-        cfg_kwargs = dict(response_mime_type="text/plain", temperature=temperature)
+        generation_config = genai.GenerationConfig(
+            response_mime_type="text/plain",
+            temperature=temperature,
+        )
         if num_predict > 0:
-            cfg_kwargs["max_output_tokens"] = num_predict
-        try:
-            generation_config = genai.GenerationConfig(**cfg_kwargs, seed=seed)
-        except TypeError:
-            generation_config = genai.GenerationConfig(**cfg_kwargs)
+            generation_config.max_output_tokens = num_predict
 
         # Convert batch tensor to list of PIL images
         pil_images = images_to_pillow(images)
@@ -637,12 +629,12 @@ class GeminiDatasetBatchNode:
                         "Set to 0 to disable the check."
                     ),
                 }),
-                "api_key": ("STRING", {"default": ""}),
-                "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
             },
             "optional": {
+                "api_key": ("STRING", {}),
                 "proxy": ("STRING", {}),
                 "system_instruction": ("STRING", {}),
+                "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "num_predict": ("INT", {
                     "default": 1024,
@@ -803,18 +795,14 @@ class GeminiDatasetBatchNode:
             system_instruction=system_instruction if system_instruction else None,
         )
 
-        cfg_kwargs = dict(
+        generation_config = genai.GenerationConfig(
             response_mime_type=(
                 "application/json" if response_type == "json" else "text/plain"
             ),
             temperature=temperature,
         )
         if num_predict > 0:
-            cfg_kwargs["max_output_tokens"] = num_predict
-        try:
-            generation_config = genai.GenerationConfig(**cfg_kwargs, seed=seed)
-        except TypeError:
-            generation_config = genai.GenerationConfig(**cfg_kwargs)
+            generation_config.max_output_tokens = num_predict
 
         pil_images = images_to_pillow(images)
         batch_size  = len(pil_images)
@@ -871,16 +859,16 @@ class GeminiNode:
                         "gemini-2.0-flash-lite-001",
                     ],
                 ),
-                "api_key": ("STRING", {"default": ""}),
-                "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
             },
             "optional": {
+                "api_key": ("STRING", {}),
                 "proxy": ("STRING", {}),
                 "image_1": ("IMAGE",),
                 "image_2": ("IMAGE",),
                 "image_3": ("IMAGE",),
                 "system_instruction": ("STRING", {}),
                 "error_fallback_value": ("STRING", {"lazy": True}),
+                "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
                 "temperature": ("FLOAT", {"default": -0.05, "min": -0.05, "max": 1, "step": 0.05}),
                 "num_predict": ("INT", {"default": 0, "min": 0, "max": 1048576, "step": 1}),
             },
