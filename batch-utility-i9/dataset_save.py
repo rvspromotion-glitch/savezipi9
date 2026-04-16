@@ -120,6 +120,10 @@ class DatasetCaptionSave:
                     "default": 95, "min": 1, "max": 100, "step": 1,
                     "tooltip": "JPEG quality (ignored when image_format = png).",
                 }),
+                "auto_download": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Automatically download the ZIP when the workflow finishes.",
+                }),
             },
         }
 
@@ -129,7 +133,7 @@ class DatasetCaptionSave:
     CATEGORY = "image/dataset"
 
     # Required inputs first, then optional – tuple must match that order
-    INPUT_IS_LIST = (True, True, True, False, False, False)
+    INPUT_IS_LIST = (True, True, True, False, False, False, False)
 
     def save_dataset(
         self,
@@ -139,6 +143,7 @@ class DatasetCaptionSave:
         output_subfolder="dataset",
         image_format="png",
         jpg_quality=95,
+        auto_download=False,
     ):
         # Defensive unwrap for scalar optional inputs
         if isinstance(output_subfolder, list):
@@ -147,6 +152,8 @@ class DatasetCaptionSave:
             image_format = image_format[0] if image_format else "png"
         if isinstance(jpg_quality, list):
             jpg_quality = jpg_quality[0] if jpg_quality else 95
+        if isinstance(auto_download, list):
+            auto_download = auto_download[0] if auto_download else False
 
         output_subfolder = output_subfolder or "dataset"
 
@@ -194,6 +201,7 @@ class DatasetCaptionSave:
                 "saved_files":   saved_files,
                 "dataset_count": [count],
                 "output_dir":    [output_dir],
+                "auto_download": [auto_download],
             }
         }
 
