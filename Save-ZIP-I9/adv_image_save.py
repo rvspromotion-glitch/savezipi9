@@ -22,7 +22,11 @@ class AdvancedImageSave:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "filename_prefix": ("STRING", {"default": "ComfyUI"})
+                "filename_prefix": ("STRING", {"default": "ComfyUI"}),
+                "auto_download": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Automatically download the ZIP when the workflow finishes.",
+                }),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -35,7 +39,7 @@ class AdvancedImageSave:
     OUTPUT_NODE = True
     CATEGORY = "image"
 
-    def save_images(self, images, filename_prefix="ComfyUI", prompt=None, extra_pnginfo=None):
+    def save_images(self, images, filename_prefix="ComfyUI", auto_download=False, prompt=None, extra_pnginfo=None):
         filename_prefix += self.prefix_append
         
         # Handle tensor properly
@@ -97,9 +101,9 @@ class AdvancedImageSave:
         ui_data = {
             "images": results,
             "saved_files": saved_files,
+            "auto_download": [auto_download],
         }
 
-        # Add text message showing total count
         if batch_size > max_preview:
             ui_data["text"] = [f"Saved {batch_size} images (showing first {max_preview} in preview). All {batch_size} images included in ZIP."]
         else:
