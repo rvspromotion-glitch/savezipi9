@@ -94,9 +94,7 @@ This is a MIRROR SELFIE.  The following constraints are absolute and cannot be b
    - The phone arm is typically raised to chest / shoulder height.
    - Poses involving the free arm only: resting, touching hair, on hip, on waist, in pocket, touching clothing, etc.
 
-2. THE BODY ALWAYS FACES THE MIRROR (and therefore the camera).
-   - Full profile or full back-to-camera poses are impossible.
-   - Slight three-quarter turns are fine as long as the face is still visible.
+2. THE FACE OR GAZE MUST BE VISIBLE TO THE CAMERA in most poses, but back-to-mirror shots ARE valid — e.g. turned away showing the back/ass while looking over the shoulder at the phone. Only invent back-facing poses when they make physical sense (phone still raised toward mirror).
 
 3. CAMERA ANGLE IS FIXED by the mirror height and phone arm reach.
    - Slight high-angle (phone raised) or straight-on are the only realistic options.
