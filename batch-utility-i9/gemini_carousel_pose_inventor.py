@@ -80,6 +80,49 @@ Each pose set must use EXACTLY this three-line format:
 7. Start your response immediately with the first [POSE] line.
 """
 
+_MIRROR_SELFIE_PROMPT_TEMPLATE = """\
+You are a creative director inventing poses for a mirror-selfie photo carousel shoot.
+
+=== MOODBOARD ANALYSIS ===
+{moodboard_analysis}
+
+=== SHOOTING CONTEXT — LOCKED ===
+This is a MIRROR SELFIE.  The following constraints are absolute and cannot be broken:
+
+1. ONE HAND IS ALWAYS OCCUPIED holding the phone up toward the mirror.
+   - Never invent a pose that requires both arms to be free.
+   - The phone arm is typically raised to chest / shoulder height.
+   - Poses involving the free arm only: resting, touching hair, on hip, on waist, in pocket, touching clothing, etc.
+
+2. THE FACE OR GAZE MUST BE VISIBLE TO THE CAMERA in most poses, but back-to-mirror shots ARE valid — e.g. turned away showing the back/ass while looking over the shoulder at the phone. Only invent back-facing poses when they make physical sense (phone still raised toward mirror).
+
+3. CAMERA ANGLE IS FIXED by the mirror height and phone arm reach.
+   - Slight high-angle (phone raised) or straight-on are the only realistic options.
+   - Do not invent drone, floor-level, or extreme angles.
+
+4. ENVIRONMENT: match exactly what is visible in the reference image
+   (bathroom mirror, bedroom mirror, gym mirror, fitting-room mirror, etc.).
+   All props and background elements must be consistent with that space.
+
+Study the reference image to confirm the exact mirror type, room, and phone-arm position, then invent {pose_count} distinct pose sets.
+
+=== OUTPUT FORMAT ===
+Each pose set must use EXACTLY this three-line format:
+
+[POSE] <single action with the FREE arm/body only — never requires both hands>
+[EXPRESSION] <one specific facial expression or micro-expression>
+[CROP & ANGLE] <framing (close-up / waist-up / full-body) — angle must be realistic for a mirror selfie>
+
+=== RULES ===
+1. [POSE] describes ONE action only.  Good: "free hand rests on hip".  Bad: "both arms raised above head".
+2. Never describe what the phone hand is doing — it is always holding the phone.
+3. Vary poses meaningfully — no two should feel redundant.
+4. Keep language concrete and visual — no abstract adjectives.
+5. Separate each pose set from the next with a line containing only: ---
+6. Do NOT add numbering, headers, or any text outside the pose set blocks.
+7. Start your response immediately with the first [POSE] line.
+"""
+
 
 def _parse_pose_sets(raw_text: str, expected_count: int) -> list[str]:
     """
@@ -135,6 +178,13 @@ class GeminiCarouselPoseInventor:
                 }),
             },
             "optional": {
+                "mirror_selfie_mode": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": (
+                        "Use a mirror-selfie-aware prompt that enforces the "
+                        "phone-in-hand constraint and mirror-facing body position."
+                    ),
+                }),
                 "safety_settings": (
                     ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE"],
                     {"default": "BLOCK_NONE"},
@@ -163,6 +213,7 @@ class GeminiCarouselPoseInventor:
         model: str = "gemini-2.5-flash",
         api_key: str = "",
         seed: int = 0,
+        mirror_selfie_mode: bool = False,
         safety_settings: str = "BLOCK_NONE",
         temperature: float = 0.9,
         proxy: str = "",
@@ -176,6 +227,8 @@ class GeminiCarouselPoseInventor:
             pose_count = pose_count[0] if pose_count else 6
         if isinstance(seed, list):
             seed = seed[0] if seed else 0
+        if isinstance(mirror_selfie_mode, list):
+            mirror_selfie_mode = mirror_selfie_mode[0] if mirror_selfie_mode else False
         if isinstance(safety_settings, list):
             safety_settings = safety_settings[0] if safety_settings else "BLOCK_NONE"
         if isinstance(temperature, list):
@@ -209,14 +262,15 @@ class GeminiCarouselPoseInventor:
         pil_images = images_to_pillow(ref_image)
         ref_pil    = pil_images[0]
 
-        prompt = _PROMPT_TEMPLATE.format(
+        template = _MIRROR_SELFIE_PROMPT_TEMPLATE if mirror_selfie_mode else _PROMPT_TEMPLATE
+        prompt = template.format(
             moodboard_analysis=moodboard_analysis.strip(),
             pose_count=pose_count,
         )
 
         logger.info(
             f"Inventing {pose_count} pose sets via {model} "
-            f"(seed={seed}, ref {ref_pil.width}×{ref_pil.height})"
+            f"(seed={seed}, mirror_selfie={mirror_selfie_mode}, ref {ref_pil.width}×{ref_pil.height})"
         )
 
         max_retries = 3
