@@ -81,54 +81,38 @@ Each pose set must use EXACTLY this three-line format:
 """
 
 _MIRROR_SELFIE_PROMPT_TEMPLATE = """\
-You are a creative director inventing poses for a mirror-selfie photo carousel shoot.
-These pose descriptions feed DIRECTLY into a text-to-image model (Flux/SD) as generation prompts.
-Every [POSE] line must read as a complete, self-contained visual scene — not just an instruction.
+You are a creative director inventing poses for a photo carousel shoot.
 
 === MOODBOARD ANALYSIS ===
 {moodboard_analysis}
 
-=== SHOOTING CONTEXT — LOCKED ===
-This is a MIRROR SELFIE.  The following constraints are absolute:
+=== TASK ===
+Study the reference image to lock the shooting context (environment, distance, angle).
+All poses must be physically plausible in that exact setting.
 
-1. ONE HAND IS ALWAYS RAISED HOLDING THE PHONE UP TOWARD THE MIRROR.
-   Every [POSE] line must include this — the phone and mirror must be explicitly present in the description.
-   Good: "holds phone up to bedroom mirror, free hand on hip"
-   Bad:  "free hand on hip"  ← the model has no idea this is a mirror selfie
+This is a MIRROR SELFIE shoot.  Two hard rules:
+- One hand is always holding the phone up toward the mirror — only the FREE hand/body varies.
+- Never invent a pose that requires both hands free.
+- Back-to-mirror shots are valid (e.g. over-the-shoulder), as long as the phone arm can still reach the mirror.
 
-2. THE PHONE ARM IS OCCUPIED — only the free arm/body can vary per pose.
-   Never invent a pose that requires both hands free.
-
-3. BACK-TO-MIRROR SHOTS ARE VALID — e.g. turned away showing the back while looking over the shoulder at the phone in the mirror.
-
-4. CAMERA ANGLE IS FIXED — the phone is held at arm's length toward the mirror, typically chest to shoulder height.
-   Only straight-on or slight high-angle are realistic.
-
-5. ENVIRONMENT: study the reference image and name the exact setting in every pose
-   (e.g. "bedroom mirror", "bathroom mirror with LED strip", "gym mirror", "fitting-room mirror").
+Invent {pose_count} distinct pose sets.
 
 === OUTPUT FORMAT ===
 Each pose set must use EXACTLY this three-line format:
 
-[POSE] <complete visual scene: subject + phone held up to [environment mirror] + what the free hand/body is doing>
+[POSE] taking a mirror selfie, <single action with the free hand or body — ONE thing only>
 [EXPRESSION] <one specific facial expression or micro-expression>
-[CROP & ANGLE] <framing (close-up / waist-up / full-body) — angle must be realistic for a mirror selfie>
-
-=== EXAMPLES OF CORRECT [POSE] LINES ===
-"holds phone up to bedroom mirror, free hand grips waistband pulling pants slightly lower"
-"holds phone up to led-strip bathroom mirror, turns back to mirror showing silhouette, glances over shoulder at reflection"
-"holds phone up to full-length bedroom mirror while seated on bed edge, free hand presses into white duvet between spread knees"
+[CROP & ANGLE] <framing (close-up / waist-up / full-body) and camera angle>
 
 === RULES ===
-1. Every [POSE] line MUST mention the phone and the mirror — these are the two non-negotiable visual anchors for the image model.
-2. [POSE] describes ONE free-arm/body variation only — keep it simple on top of the mirror-selfie base.
-3. Vary poses meaningfully — no two should feel redundant.
-4. Keep language concrete and visual — no abstract adjectives.
-5. Separate each pose set from the next with a line containing only: ---
-6. Do NOT add numbering, headers, or any text outside the pose set blocks.
-7. Start your response immediately with the first [POSE] line.
-
-Invent {pose_count} distinct pose sets.
+1. Every [POSE] line must start with "taking a mirror selfie," — this is the only visual anchor needed.
+2. Do NOT invent or name a location — the environment comes from the reference image.
+3. [POSE] describes ONE free-arm/body action only. Good: "taking a mirror selfie, free hand on hip". Bad: "taking a mirror selfie, both arms raised".
+4. Vary poses meaningfully — no two should feel redundant.
+5. Keep language concrete and visual — no abstract adjectives.
+6. Separate each pose set from the next with a line containing only: ---
+7. Do NOT add numbering, headers, or any text outside the pose set blocks.
+8. Start your response immediately with the first [POSE] line.
 """
 
 
