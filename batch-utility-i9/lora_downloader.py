@@ -12,6 +12,7 @@ Downloads a LoRA .safetensors file into ComfyUI's loras folder.
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 
@@ -27,13 +28,26 @@ def _is_gdrive(url: str) -> bool:
     return "drive.google.com" in url or "docs.google.com" in url
 
 
+def _gdrive_file_id(url: str) -> str | None:
+    """Extract the file ID from a Google Drive URL."""
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]id=([a-zA-Z0-9_-]+)", url)
+    if m:
+        return m.group(1)
+    return None
+
+
 def _download(url: str, tmp_path: str) -> None:
     """Download url → tmp_path using the best available tool."""
 
     if _is_gdrive(url) and shutil.which("gdown"):
-        logger.info("Using gdown (Google Drive)")
+        file_id = _gdrive_file_id(url)
+        target  = file_id if file_id else url   # ID is faster; URL fallback
+        logger.info(f"Using gdown (file_id={file_id or 'not found, using url'})")
         subprocess.run(
-            ["gdown", "--fuzzy", url, "-O", tmp_path],
+            ["gdown", target, "-O", tmp_path],
             check=True,
         )
 
