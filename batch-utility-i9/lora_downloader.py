@@ -5,14 +5,16 @@ Downloads a LoRA .safetensors file from a direct URL into ComfyUI's loras
 folder before the rest of the workflow runs.
 
 - Instant passthrough if the file already exists (no re-download).
-- Streams in 8 MB chunks so large files don't block Python's GIL.
-- Writes to a .tmp file first, then renames — no corrupt partials on crash.
-- Output lora_name is the relative path expected by Load LoRA nodes
-  (e.g. "my_lora.safetensors" or "subfolder/my_lora.safetensors").
+- Streams in 8 MB chunks for speed.
+- Handles Google Drive large-file confirmation pages automatically.
+- Writes to .tmp then renames atomically — no corrupt partials on crash.
+- Output lora_name is the relative path expected by Load LoRA / Multi LoRA
+  Loader nodes (e.g. "my_lora.safetensors" or "subfolder/my_lora.safetensors").
 """
 
 import logging
 import os
+import re
 
 import requests
 import folder_paths
@@ -20,6 +22,32 @@ import folder_paths
 logger = logging.getLogger("LoraDownloader")
 
 _CHUNK = 8 * 1024 * 1024   # 8 MB per chunk
+
+
+def _resolve_url(session: requests.Session, url: str, headers: dict) -> requests.Response:
+    """
+    GET the URL and follow Google Drive's large-file confirmation page if hit.
+    Returns an open streaming response pointing at the actual file bytes.
+    """
+    r = session.get(url, stream=True, headers=headers, timeout=30)
+    r.raise_for_status()
+
+    # Google Drive serves an HTML warning page for large files instead of
+    # the raw bytes.  Detect it and re-request with the confirm token.
+    content_type = r.headers.get("Content-Type", "")
+    if "text/html" in content_type and "drive.google.com" in url:
+        # Read just enough of the page to find the confirm parameter
+        chunk = next(r.iter_content(chunk_size=32768), b"")
+        r.close()
+        match = re.search(rb'confirm=([^&"\']+)', chunk)
+        confirm = match.group(1).decode() if match else "t"
+        sep = "&" if "?" in url else "?"
+        confirmed_url = f"{url}{sep}confirm={confirm}"
+        logger.info(f"Google Drive confirmation redirect → confirm={confirm}")
+        r = session.get(confirmed_url, stream=True, headers=headers, timeout=30)
+        r.raise_for_status()
+
+    return r
 
 
 class LoraDownloader:
@@ -35,15 +63,12 @@ class LoraDownloader:
                 "url": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "tooltip": "Direct download URL to a .safetensors file.",
+                    "tooltip": "Direct download URL to a .safetensors file. Google Drive links are supported.",
                 }),
                 "filename": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "tooltip": (
-                        "Filename to save as (e.g. my_lora.safetensors). "
-                        "Leave empty to infer from the URL."
-                    ),
+                    "tooltip": "Filename to save as (e.g. my_lora.safetensors). Leave empty to infer from URL.",
                 }),
             },
             "optional": {
@@ -64,8 +89,6 @@ class LoraDownloader:
     RETURN_NAMES  = ("lora_name",)
     FUNCTION      = "download_lora"
     CATEGORY      = "loaders"
-
-    # ------------------------------------------------------------------
 
     def download_lora(
         self,
@@ -90,10 +113,10 @@ class LoraDownloader:
 
         # Resolve filename from URL if not provided
         if not filename:
-            filename = url.split("?")[0].rstrip("/").split("/")[-1]
-            if not filename:
-                filename = "lora.safetensors"
-            elif "." not in filename:
+            # Strip query string before grabbing the last path segment
+            clean = url.split("?")[0].rstrip("/")
+            filename = clean.split("/")[-1] or "lora.safetensors"
+            if "." not in filename:
                 filename += ".safetensors"
 
         # Resolve destination directory
@@ -102,7 +125,7 @@ class LoraDownloader:
         os.makedirs(dest_dir, exist_ok=True)
 
         dest_path = os.path.join(dest_dir, filename)
-        lora_name = os.path.join(subfolder, filename).replace("\\", "/") if subfolder else filename
+        lora_name = (os.path.join(subfolder, filename) if subfolder else filename).replace("\\", "/")
 
         # ── Passthrough: already downloaded ──────────────────────────────────
         if os.path.exists(dest_path):
@@ -111,14 +134,14 @@ class LoraDownloader:
             return (lora_name,)
 
         # ── Download ──────────────────────────────────────────────────────────
-        logger.info(f"Downloading LoRA → {lora_name}  ({url})")
+        logger.info(f"Downloading LoRA → {filename}  ({url[:80]}…)")
 
-        headers = {"Authorization": f"Bearer {civitai_token}"} if civitai_token else {}
+        headers  = {"Authorization": f"Bearer {civitai_token}"} if civitai_token else {}
         tmp_path = dest_path + ".tmp"
 
         try:
-            with requests.get(url, stream=True, headers=headers, timeout=30) as r:
-                r.raise_for_status()
+            with requests.Session() as session:
+                r = _resolve_url(session, url, headers)
                 total    = int(r.headers.get("Content-Length", 0))
                 total_mb = total / 1024 / 1024 if total else None
                 downloaded = 0
@@ -131,13 +154,13 @@ class LoraDownloader:
                         downloaded += len(chunk)
                         if total_mb:
                             logger.info(
-                                f"  {downloaded / 1024 / 1024:.0f} / {total_mb:.0f} MB  "
+                                f"  {downloaded / 1024 / 1024:.0f} / {total_mb:.0f} MB "
                                 f"({downloaded / total * 100:.0f}%)"
                             )
 
-            os.replace(tmp_path, dest_path)   # atomic on same filesystem
+            os.replace(tmp_path, dest_path)
             final_mb = os.path.getsize(dest_path) / 1024 / 1024
-            logger.info(f"✓ LoRA download complete: {lora_name} ({final_mb:.1f} MB)")
+            logger.info(f"✓ Download complete: {lora_name} ({final_mb:.1f} MB)")
 
         except Exception as exc:
             if os.path.exists(tmp_path):
