@@ -5,11 +5,9 @@ Stage 2 of the creative pipeline.  Takes the moodboard analysis from
 GeminiMoodboardAnalyzer and a single reference image, then asks Gemini to
 invent N distinct pose sets for a carousel shoot.
 
-Each pose set uses a strict three-line format:
-
-    [POSE] ...
-    [EXPRESSION] ...
-    [CROP & ANGLE] ...
+Each pose set is a single natural language sentence describing the scene as
+if captioning a photograph — no labels, no brackets.  Pose, expression, and
+framing are blended into one flowing sentence.
 
 Poses are intentionally simple (one action only) because Flux/SD struggles
 with compound poses.  The shooting context (mirror selfie, outdoor, etc.) is
@@ -64,20 +62,19 @@ LOCK the shooting context to match the reference image exactly.  Every pose you 
 Invent {pose_count} distinct pose sets for a carousel.
 
 === OUTPUT FORMAT ===
-Each pose set must use EXACTLY this three-line format:
-
-[POSE] <single simple action — ONE thing only, never compound>
-[EXPRESSION] <one specific facial expression or micro-expression>
-[CROP & ANGLE] <framing (close-up / waist-up / full-body) and camera angle>
+Write each pose set as a single natural language sentence describing the scene as if captioning a photograph.
+Blend pose, expression, framing, and camera angle into one flowing sentence.
+Example: "the woman is leaning against the wall with one hand on her hip looking directly at the camera in a waist-up shot"
 
 === RULES ===
-1. [POSE] must describe ONE action only.  Good: "leans back against wall".  Bad: "leans back while reaching up and tilting head".
-2. Vary the poses meaningfully — no two poses should feel redundant.
-3. All poses must be achievable in the shooting context from the reference image.
-4. Keep language concrete and visual — no abstract adjectives.
-5. Separate each pose set from the next with a line containing only: ---
-6. Do NOT add numbering, headers, or any text outside the pose set blocks.
-7. Start your response immediately with the first [POSE] line.
+1. Write ONE sentence per pose — no labels, no brackets, no bullet points.
+2. Describe ONE action only.  Good: "she leans back against the wall".  Bad: "she leans back while reaching up and tilting her head".
+3. Vary the poses meaningfully — no two poses should feel redundant.
+4. All poses must be achievable in the shooting context from the reference image.
+5. Keep language concrete and visual — no abstract adjectives.
+6. Separate each pose set from the next with a line containing only: ---
+7. Do NOT add numbering, headers, or any text outside the sentence blocks.
+8. Start your response immediately with the first sentence.
 """
 
 _MIRROR_SELFIE_PROMPT_TEMPLATE = """\
@@ -98,48 +95,42 @@ This is a MIRROR SELFIE shoot.  Two hard rules:
 Invent {pose_count} distinct pose sets.
 
 === OUTPUT FORMAT ===
-Each pose set must use EXACTLY this three-line format:
-
-[POSE] taking a mirror selfie, <single action with the free hand or body — ONE thing only>
-[EXPRESSION] <one specific facial expression or micro-expression>
-[CROP & ANGLE] <framing (close-up / waist-up / full-body) and camera angle>
+Write each pose set as a single natural language sentence describing the scene as if captioning a photograph.
+Blend pose, expression, framing, and camera angle into one flowing sentence. Always open the sentence with "taking a mirror selfie".
+Example: "taking a mirror selfie, the woman has her free hand on her hip and is smiling softly at her reflection in a waist-up shot"
 
 === RULES ===
-1. Every [POSE] line must start with "taking a mirror selfie," — this is the only visual anchor needed.
-2. Do NOT invent or name a location — the environment comes from the reference image.
-3. [POSE] describes ONE free-arm/body action only. Good: "taking a mirror selfie, free hand on hip". Bad: "taking a mirror selfie, both arms raised".
-4. Vary poses meaningfully — no two should feel redundant.
-5. Keep language concrete and visual — no abstract adjectives.
-6. Separate each pose set from the next with a line containing only: ---
-7. Do NOT add numbering, headers, or any text outside the pose set blocks.
-8. Start your response immediately with the first [POSE] line.
+1. Write ONE sentence per pose — no labels, no brackets, no bullet points.
+2. Every sentence must open with "taking a mirror selfie," — this is the only visual anchor needed.
+3. Do NOT invent or name a location — the environment comes from the reference image.
+4. The sentence describes ONE free-arm/body action only. Good: "taking a mirror selfie, her free hand rests on her hip". Bad: "taking a mirror selfie, both arms raised".
+5. Vary poses meaningfully — no two should feel redundant.
+6. Keep language concrete and visual — no abstract adjectives.
+7. Separate each pose set from the next with a line containing only: ---
+8. Do NOT add numbering, headers, or any text outside the sentence blocks.
+9. Start your response immediately with the first sentence.
 """
 
 
 def _parse_pose_sets(raw_text: str, expected_count: int) -> list[str]:
     """
     Split Gemini's response into individual pose-set strings.
-    Accepts ---, ----, — etc. as separators and validates that each block
-    contains all three required tags.
+    Accepts ---, ----, — etc. as separators; each block should be a single
+    natural-language caption sentence.
     """
     normalised = re.sub(r"\n[-—]{2,}\n", "\n---\n", raw_text)
     blocks = [b.strip() for b in normalised.split("---") if b.strip()]
 
-    valid = []
-    for block in blocks:
-        if "[POSE]" in block and "[EXPRESSION]" in block and "[CROP & ANGLE]" in block:
-            valid.append(block)
-
-    if not valid:
+    if not blocks:
         logger.warning("No valid pose-set blocks found; returning raw text as single entry")
         return [raw_text.strip()]
 
-    if len(valid) < expected_count:
+    if len(blocks) < expected_count:
         logger.warning(
-            f"Expected {expected_count} pose sets but parsed {len(valid)}"
+            f"Expected {expected_count} pose sets but parsed {len(blocks)}"
         )
 
-    return valid
+    return blocks
 
 
 class GeminiCarouselPoseInventor:
