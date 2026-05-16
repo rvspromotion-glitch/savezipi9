@@ -2,24 +2,11 @@
 ExpressionRandomizerBatch
 =========================
 Injects a randomly selected facial expression description into each prompt
-in a batch.  Filters narrow the expression pool before sampling so every
-image gets an expression that fits the desired mood, mouth position, energy
-level, and hand/mirror requirements.
+in a batch.  Each filter option is an individual toggle so you can click
+exactly which moods, mouth types, and energy levels are allowed before
+sampling.
 
 The same seed produces the same per-image selection sequence across runs.
-
-Filter inputs
--------------
-mood_filter   : comma-separated moods, or "all"
-                options: joyful, intense, confident, warm, soft, neutral,
-                         flirty, playful, attitude
-mouth_filter  : comma-separated mouth types, or "all"
-                options: open, pout, smile, closed, tongue out, parted, bite
-energy_filter : comma-separated energy levels, or "all"
-                options: high, medium, low
-hands         : "any" | "with hands" | "no hands"
-mirror        : "any" | "mirror only" | "no mirror"
-source        : "all" | "real only" | "ai only"
 """
 
 import logging
@@ -552,45 +539,36 @@ _EXPRESSIONS = [
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Filtering
 # ---------------------------------------------------------------------------
 
-def _parse_filter(raw: str) -> set[str] | None:
-    """Return a set of allowed values, or None meaning 'no filter'."""
-    if isinstance(raw, list):
-        raw = raw[0] if raw else "all"
-    raw = (raw or "all").strip().lower()
-    if raw in ("all", "", "*"):
+def _build_allowed(flag_map: dict[str, bool]) -> set[str] | None:
+    """
+    Turn a {value: bool} map into an allowed-set.
+    Returns None (= no filter) if everything is enabled or everything is disabled
+    (disabling all is treated as 'no restriction' to avoid an empty pool).
+    """
+    enabled = {k for k, v in flag_map.items() if v}
+    if len(enabled) == 0 or len(enabled) == len(flag_map):
         return None
-    return {v.strip() for v in raw.split(",") if v.strip()}
+    return enabled
 
 
-def _filter_expressions(
-    mood_filter,
-    mouth_filter,
-    energy_filter,
+def _filter_pool(
+    allowed_moods,
+    allowed_mouths,
+    allowed_energies,
     hands: str,
     mirror: str,
     source: str,
 ) -> list[dict]:
-    moods    = _parse_filter(mood_filter)
-    mouths   = _parse_filter(mouth_filter)
-    energies = _parse_filter(energy_filter)
-
-    if isinstance(hands, list):
-        hands = hands[0] if hands else "any"
-    if isinstance(mirror, list):
-        mirror = mirror[0] if mirror else "any"
-    if isinstance(source, list):
-        source = source[0] if source else "all"
-
     pool = []
     for expr in _EXPRESSIONS:
-        if moods    and expr["mood"]   not in moods:
+        if allowed_moods   and expr["mood"]   not in allowed_moods:
             continue
-        if mouths   and expr["mouth"]  not in mouths:
+        if allowed_mouths  and expr["mouth"]  not in allowed_mouths:
             continue
-        if energies and expr["energy"] not in energies:
+        if allowed_energies and expr["energy"] not in allowed_energies:
             continue
         if hands == "with hands" and not expr["hands"]:
             continue
@@ -605,7 +583,6 @@ def _filter_expressions(
         if source == "ai only" and expr["source"] != "ai":
             continue
         pool.append(expr)
-
     return pool
 
 
@@ -613,10 +590,23 @@ def _filter_expressions(
 # Node
 # ---------------------------------------------------------------------------
 
+def _unwrap(val, default):
+    """Unwrap a value ComfyUI may have wrapped in a list."""
+    if isinstance(val, list):
+        return val[0] if val else default
+    return val if val is not None else default
+
+
 class ExpressionRandomizerBatch:
     """
     Randomly injects an expression description into each prompt in a batch.
-    Filters control which expressions are eligible before sampling.
+
+    Mood, mouth, and energy filters are individual toggles — uncheck a type
+    to exclude it from the pool.  If every toggle in a group is unchecked the
+    group filter is ignored (treated as all-on) so you never accidentally get
+    an empty pool from a single group.
+
+    hands / mirror / source are dropdowns for the non-boolean options.
     """
 
     @classmethod
@@ -626,47 +616,40 @@ class ExpressionRandomizerBatch:
                 "prompts": ("STRING", {"forceInput": True}),
                 "seed": ("INT", {
                     "default": 0, "min": 0, "max": 2**31, "step": 1,
-                    "tooltip": "Controls the per-image selection sequence. Same seed = same expressions.",
+                    "tooltip": "Same seed = same expression sequence every run.",
                 }),
             },
             "optional": {
-                "mood_filter": ("STRING", {
-                    "default": "all",
-                    "tooltip": (
-                        "Comma-separated moods to allow, or 'all'.\n"
-                        "Options: joyful, intense, confident, warm, soft, "
-                        "neutral, flirty, playful, attitude"
-                    ),
-                }),
-                "mouth_filter": ("STRING", {
-                    "default": "all",
-                    "tooltip": (
-                        "Comma-separated mouth types to allow, or 'all'.\n"
-                        "Options: open, pout, smile, closed, tongue out, parted, bite"
-                    ),
-                }),
-                "energy_filter": ("STRING", {
-                    "default": "all",
-                    "tooltip": (
-                        "Comma-separated energy levels to allow, or 'all'.\n"
-                        "Options: high, medium, low"
-                    ),
-                }),
-                "hands": (
-                    ["any", "with hands", "no hands"],
-                    {"default": "any"},
-                ),
-                "mirror": (
-                    ["any", "mirror only", "no mirror"],
-                    {"default": "any"},
-                ),
-                "source": (
-                    ["all", "real only", "ai only"],
-                    {"default": "all"},
-                ),
+                # ── Mood ──────────────────────────────────────────────────
+                "mood_joyful":    ("BOOLEAN", {"default": True}),
+                "mood_intense":   ("BOOLEAN", {"default": True}),
+                "mood_confident": ("BOOLEAN", {"default": True}),
+                "mood_warm":      ("BOOLEAN", {"default": True}),
+                "mood_soft":      ("BOOLEAN", {"default": True}),
+                "mood_neutral":   ("BOOLEAN", {"default": True}),
+                "mood_flirty":    ("BOOLEAN", {"default": True}),
+                "mood_playful":   ("BOOLEAN", {"default": True}),
+                "mood_attitude":  ("BOOLEAN", {"default": True}),
+                # ── Mouth ─────────────────────────────────────────────────
+                "mouth_open":       ("BOOLEAN", {"default": True}),
+                "mouth_pout":       ("BOOLEAN", {"default": True}),
+                "mouth_smile":      ("BOOLEAN", {"default": True}),
+                "mouth_closed":     ("BOOLEAN", {"default": True}),
+                "mouth_tongue_out": ("BOOLEAN", {"default": True}),
+                "mouth_parted":     ("BOOLEAN", {"default": True}),
+                "mouth_bite":       ("BOOLEAN", {"default": True}),
+                # ── Energy ────────────────────────────────────────────────
+                "energy_high":   ("BOOLEAN", {"default": True}),
+                "energy_medium": ("BOOLEAN", {"default": True}),
+                "energy_low":    ("BOOLEAN", {"default": True}),
+                # ── Other filters ─────────────────────────────────────────
+                "hands":  (["any", "with hands", "no hands"],   {"default": "any"}),
+                "mirror": (["any", "mirror only", "no mirror"], {"default": "any"}),
+                "source": (["all", "real only", "ai only"],     {"default": "all"}),
+                # ── Output options ────────────────────────────────────────
                 "include_title": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Prepend the expression title before its description in the output.",
+                    "tooltip": "Prepend the expression title before its description.",
                 }),
                 "separator": ("STRING", {
                     "default": ", ",
@@ -675,41 +658,98 @@ class ExpressionRandomizerBatch:
             },
         }
 
-    RETURN_TYPES  = ("STRING",)
-    RETURN_NAMES  = ("prompts",)
-    FUNCTION      = "apply"
-    CATEGORY      = "Gemini/Creative"
+    RETURN_TYPES   = ("STRING",)
+    RETURN_NAMES   = ("prompts",)
+    FUNCTION       = "apply"
+    CATEGORY       = "Gemini/Creative"
 
-    INPUT_IS_LIST  = (True, False, False, False, False, False, False, False, False, False)
+    # Only prompts is a list; all other inputs are scalars
+    INPUT_IS_LIST  = (True,)
     OUTPUT_IS_LIST = (True,)
 
     def apply(
         self,
         prompts: list[str],
         seed: int = 0,
-        mood_filter="all",
-        mouth_filter="all",
-        energy_filter="all",
-        hands="any",
-        mirror="any",
-        source="all",
+        # mood
+        mood_joyful: bool = True,
+        mood_intense: bool = True,
+        mood_confident: bool = True,
+        mood_warm: bool = True,
+        mood_soft: bool = True,
+        mood_neutral: bool = True,
+        mood_flirty: bool = True,
+        mood_playful: bool = True,
+        mood_attitude: bool = True,
+        # mouth
+        mouth_open: bool = True,
+        mouth_pout: bool = True,
+        mouth_smile: bool = True,
+        mouth_closed: bool = True,
+        mouth_tongue_out: bool = True,
+        mouth_parted: bool = True,
+        mouth_bite: bool = True,
+        # energy
+        energy_high: bool = True,
+        energy_medium: bool = True,
+        energy_low: bool = True,
+        # other filters
+        hands: str = "any",
+        mirror: str = "any",
+        source: str = "all",
+        # output
         include_title: bool = False,
-        separator=", ",
+        separator: str = ", ",
     ) -> tuple:
-        # Unwrap scalars that ComfyUI may wrap in lists
-        if isinstance(seed, list):
-            seed = seed[0] if seed else 0
-        if isinstance(include_title, list):
-            include_title = include_title[0] if include_title else False
-        if isinstance(separator, list):
-            separator = separator[0] if separator else ", "
+        # Unwrap anything ComfyUI may have wrapped
+        seed          = _unwrap(seed, 0)
+        include_title = _unwrap(include_title, False)
+        separator     = _unwrap(separator, ", ")
+        hands         = _unwrap(hands, "any")
+        mirror        = _unwrap(mirror, "any")
+        source        = _unwrap(source, "all")
 
-        pool = _filter_expressions(mood_filter, mouth_filter, energy_filter, hands, mirror, source)
+        mood_joyful    = _unwrap(mood_joyful, True)
+        mood_intense   = _unwrap(mood_intense, True)
+        mood_confident = _unwrap(mood_confident, True)
+        mood_warm      = _unwrap(mood_warm, True)
+        mood_soft      = _unwrap(mood_soft, True)
+        mood_neutral   = _unwrap(mood_neutral, True)
+        mood_flirty    = _unwrap(mood_flirty, True)
+        mood_playful   = _unwrap(mood_playful, True)
+        mood_attitude  = _unwrap(mood_attitude, True)
+
+        mouth_open       = _unwrap(mouth_open, True)
+        mouth_pout       = _unwrap(mouth_pout, True)
+        mouth_smile      = _unwrap(mouth_smile, True)
+        mouth_closed     = _unwrap(mouth_closed, True)
+        mouth_tongue_out = _unwrap(mouth_tongue_out, True)
+        mouth_parted     = _unwrap(mouth_parted, True)
+        mouth_bite       = _unwrap(mouth_bite, True)
+
+        energy_high   = _unwrap(energy_high, True)
+        energy_medium = _unwrap(energy_medium, True)
+        energy_low    = _unwrap(energy_low, True)
+
+        allowed_moods = _build_allowed({
+            "joyful": mood_joyful, "intense": mood_intense, "confident": mood_confident,
+            "warm": mood_warm, "soft": mood_soft, "neutral": mood_neutral,
+            "flirty": mood_flirty, "playful": mood_playful, "attitude": mood_attitude,
+        })
+        allowed_mouths = _build_allowed({
+            "open": mouth_open, "pout": mouth_pout, "smile": mouth_smile,
+            "closed": mouth_closed, "tongue out": mouth_tongue_out,
+            "parted": mouth_parted, "bite": mouth_bite,
+        })
+        allowed_energies = _build_allowed({
+            "high": energy_high, "medium": energy_medium, "low": energy_low,
+        })
+
+        pool = _filter_pool(allowed_moods, allowed_mouths, allowed_energies, hands, mirror, source)
 
         if not pool:
             logger.warning(
-                "ExpressionRandomizerBatch: no expressions match the current filters — "
-                "returning prompts unchanged."
+                "ExpressionRandomizerBatch: no expressions match filters — returning prompts unchanged."
             )
             return (list(prompts),)
 
@@ -723,16 +763,12 @@ class ExpressionRandomizerBatch:
 
         for idx, prompt in enumerate(prompts):
             expr = rng.choice(pool)
-            if include_title:
-                expr_text = f"{expr['title']}: {expr['desc']}"
-            else:
-                expr_text = expr["desc"]
-
+            expr_text = f"{expr['title']}: {expr['desc']}" if include_title else expr["desc"]
             combined = f"{prompt}{separator}{expr_text}"
             results.append(combined)
             logger.debug(f"  [{idx}] {expr['title']} → {combined[:100]}")
 
-        logger.info(f"✓ ExpressionRandomizerBatch: processed {len(results)} prompts")
+        logger.info(f"✓ ExpressionRandomizerBatch: {len(results)} prompts processed")
         return (results,)
 
 
