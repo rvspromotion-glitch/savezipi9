@@ -14,11 +14,10 @@ Intended as Stage 1 of a two-stage creative pipeline:
 
 import logging
 import random
-import time
 
 import google.generativeai as genai
 
-from .utils import images_to_pillow, temporary_env_var
+from .utils import RETRY_INPUTS, GeminiGenerationError, generate_with_retry, images_to_pillow
 
 logger = logging.getLogger("GeminiMoodboardAnalyzer")
 
@@ -89,6 +88,7 @@ class GeminiMoodboardAnalyzer:
                     "default": 0.6, "min": 0.0, "max": 1.0, "step": 0.05,
                 }),
                 "proxy":           ("STRING", {"default": ""}),
+                **RETRY_INPUTS,
             },
         }
 
@@ -108,6 +108,8 @@ class GeminiMoodboardAnalyzer:
         safety_settings: str = "BLOCK_NONE",
         temperature: float = 0.6,
         proxy: str = "",
+        max_retries: int = 5,
+        on_failure: str = "stop",
     ) -> tuple:
         # Defensive unwrap for optional scalar inputs
         for name, val, default in [
@@ -122,6 +124,10 @@ class GeminiMoodboardAnalyzer:
             api_key = api_key[0] if api_key else ""
         if isinstance(seed, list):
             seed = seed[0] if seed else 0
+        if isinstance(max_retries, list):
+            max_retries = max_retries[0] if max_retries else 5
+        if isinstance(on_failure, list):
+            on_failure = on_failure[0] if on_failure else "stop"
 
         api_key = (api_key or "").strip()
         proxy   = (proxy   or "").strip() or None
@@ -141,39 +147,30 @@ class GeminiMoodboardAnalyzer:
             temperature=temperature,
             max_output_tokens=2048,
         )
-        try:
-            generation_config = genai.GenerationConfig(**cfg_kwargs, seed=seed)
-        except TypeError:
-            generation_config = genai.GenerationConfig(**cfg_kwargs)
 
         pil_images = images_to_pillow(images)
         batch_size  = len(pil_images)
         logger.info(f"Analyzing moodboard: {batch_size} image(s) via {model} (seed={seed})")
 
-        max_retries = 3
-        last_error  = None
+        try:
+            analysis = generate_with_retry(
+                model_instance,
+                [_ANALYSIS_PROMPT] + pil_images,
+                cfg_kwargs,
+                seed=seed,
+                max_retries=max_retries,
+                proxy=proxy,
+                logger=logger,
+                label="Moodboard analysis",
+            )
+        except GeminiGenerationError as exc:
+            if on_failure == "stop":
+                raise
+            logger.error(f"{exc} – returning placeholder analysis")
+            return (f"[Moodboard analysis failed: {exc}]",)
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                content = [_ANALYSIS_PROMPT] + pil_images
-                with temporary_env_var("HTTP_PROXY", proxy), \
-                     temporary_env_var("HTTPS_PROXY", proxy):
-                    response = model_instance.generate_content(
-                        content,
-                        generation_config=generation_config,
-                    )
-                analysis = response.text.strip()
-                logger.info(f"✓ Moodboard analysis: {len(analysis)} chars (attempt {attempt})")
-                return (analysis,)
-
-            except Exception as exc:
-                last_error = exc
-                logger.warning(f"Attempt {attempt}/{max_retries} failed: {exc}")
-                if attempt < max_retries:
-                    time.sleep(1.5)
-
-        logger.error(f"All {max_retries} attempts failed: {last_error}", exc_info=True)
-        return (f"[Moodboard analysis failed after {max_retries} attempts: {last_error}]",)
+        logger.info(f"✓ Moodboard analysis: {len(analysis)} chars")
+        return (analysis,)
 
 
 # ---------------------------------------------------------------------------

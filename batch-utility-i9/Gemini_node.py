@@ -7,7 +7,7 @@ import time
 import google.generativeai as genai
 from torch import Tensor
 
-from .utils import images_to_pillow, temporary_env_var
+from .utils import RETRY_INPUTS, GeminiGenerationError, generate_with_retry, images_to_pillow
 
 class GeminiBatchNode:
     """
@@ -50,6 +50,7 @@ class GeminiBatchNode:
                 "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "num_predict": ("INT", {"default": 512, "min": 0, "max": 1048576, "step": 1}),
+                **RETRY_INPUTS,
             },
         }
 
@@ -66,57 +67,47 @@ class GeminiBatchNode:
         pil_image,
         model_instance,
         prompt: str,
-        generation_config,
+        config_kwargs: dict,
+        seed: int | None,
+        max_retries: int,
+        on_failure: str,
         proxy: str | None,
         batch_size: int,
         logger,
     ):
         """
         Process a single image synchronously (runs in thread pool for concurrency).
-        Retries up to 3 times before falling back to error message.
+        Retries with an incrementing seed; raises or falls back once retries run out.
 
         Returns:
             tuple: (index, generated_prompt) to preserve ordering
         """
-        max_retries = 3
-        last_error = None
+        try:
+            generated_prompt = generate_with_retry(
+                model_instance,
+                [prompt, pil_image],
+                config_kwargs,
+                seed=seed,
+                max_retries=max_retries,
+                proxy=proxy,
+                logger=logger,
+                label=f"Image {idx + 1}/{batch_size}",
+            )
+        except GeminiGenerationError as e:
+            if on_failure == "stop":
+                raise
+            fallback_prompt = f"Error generating prompt for image {idx + 1}"
+            logger.error(f"{e} – using fallback prompt: {fallback_prompt}")
+            return (idx, fallback_prompt)
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                # Use temporary_env_var context manager for proxy settings
-                with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
-                    # Call the synchronous generate_content (thread-safe)
-                    response = model_instance.generate_content(
-                        [prompt, pil_image],
-                        generation_config=generation_config
-                    )
-                generated_prompt = response.text.strip()
+        # Detailed logging to debug
+        logger.info(f"Image {idx + 1}/{batch_size}:")
+        logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
+        logger.info(f"  First 150 chars: {generated_prompt[:150]}...")
+        logger.info(f"  Last 150 chars: ...{generated_prompt[-150:]}")
+        logger.debug(f"  Full prompt: {generated_prompt}")
 
-                # Detailed logging to debug
-                logger.info(f"Image {idx + 1}/{batch_size} (attempt {attempt}):")
-                logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
-                logger.info(f"  First 150 chars: {generated_prompt[:150]}...")
-                logger.info(f"  Last 150 chars: ...{generated_prompt[-150:]}")
-                logger.debug(f"  Full prompt: {generated_prompt}")
-
-                return (idx, generated_prompt)
-
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries:
-                    # Not the last attempt, log and retry
-                    logger.warning(f"Image {idx + 1}/{batch_size} attempt {attempt} failed: {e}")
-                    logger.info(f"Retrying image {idx + 1}/{batch_size} (attempt {attempt + 1}/{max_retries})...")
-                    # Short delay before retry to avoid rate limiting
-                    time.sleep(0.5)
-                else:
-                    # Last attempt failed, log full error
-                    logger.error(f"Image {idx + 1}/{batch_size} failed after {max_retries} attempts: {e}", exc_info=True)
-
-        # All retries exhausted, use fallback
-        fallback_prompt = f"Error generating prompt for image {idx + 1}"
-        logger.warning(f"Using fallback prompt after {max_retries} failed attempts: {fallback_prompt}")
-        return (idx, fallback_prompt)
+        return (idx, generated_prompt)
 
     def process_batch(
         self,
@@ -131,32 +122,34 @@ class GeminiBatchNode:
         seed: int | None = None,
         temperature: float = 0.7,
         num_predict: int = 512,
+        max_retries: int = 5,
+        on_failure: str = "stop",
     ):
         """Process each image in batch and return list of prompts."""
-        
+
         logger = logging.getLogger("ComfyUI-Gemini-Batch")
-        
+
         # Configure API
         if "GOOGLE_API_KEY" in os.environ and not api_key:
             genai.configure(transport="rest")
         else:
             genai.configure(api_key=api_key, transport="rest")
-        
+
         # Initialize model
         model_instance = genai.GenerativeModel(
-            model, 
-            safety_settings=safety_settings, 
+            model,
+            safety_settings=safety_settings,
             system_instruction=system_instruction if system_instruction else None
         )
-        
-        # Configure generation
-        generation_config = genai.GenerationConfig(
+
+        # Configure generation (seed is added per attempt by generate_with_retry)
+        config_kwargs = dict(
             response_mime_type="application/json" if response_type == "json" else "text/plain",
             temperature=temperature,
         )
         if num_predict > 0:
-            generation_config.max_output_tokens = num_predict
-        
+            config_kwargs["max_output_tokens"] = num_predict
+
         # Convert batch tensor to list of PIL images
         pil_images = images_to_pillow(images)
         batch_size = len(pil_images)
@@ -176,7 +169,10 @@ class GeminiBatchNode:
                     pil_image=pil_image,
                     model_instance=model_instance,
                     prompt=prompt,
-                    generation_config=generation_config,
+                    config_kwargs=config_kwargs,
+                    seed=seed,
+                    max_retries=max_retries,
+                    on_failure=on_failure,
                     proxy=proxy,
                     batch_size=batch_size,
                     logger=logger,
@@ -185,6 +181,7 @@ class GeminiBatchNode:
 
             # Wait for all futures to complete and collect results
             # Each result is a tuple: (index, generated_prompt)
+            # With on_failure="stop" a failed image re-raises here and halts the run
             results = [future.result() for future in futures]
 
         # Sort results by index to ensure correct order
@@ -267,6 +264,8 @@ class GeminiCarouselCharacterTransferNode:
                 "safety_settings": (["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE"], {"default": "BLOCK_NONE"}),
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "num_predict": ("INT", {"default": 1024, "min": 0, "max": 2048, "step": 1}),
+                "seed": ("INT", {"default": random.randint(1, 2**31), "min": 0, "max": 2**31, "step": 1}),
+                **RETRY_INPUTS,
             },
         }
 
@@ -281,7 +280,10 @@ class GeminiCarouselCharacterTransferNode:
         self,
         pil_images,
         model_instance,
-        generation_config,
+        config_kwargs: dict,
+        seed: int | None,
+        max_retries: int,
+        on_failure: str,
         proxy: str | None,
         logger,
     ):
@@ -321,65 +323,62 @@ class GeminiCarouselCharacterTransferNode:
             "CRITICAL: Do NOT describe the person's face, hair color, eye color, skin, or body shape."
         )
 
-        max_retries = 3
-        for attempt in range(1, max_retries + 1):
-            try:
-                with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
-                    content_list = [extraction_prompt] + pil_images
-                    response = model_instance.generate_content(
-                        content_list,
-                        generation_config=generation_config
-                    )
-                result_text = response.text.strip()
+        try:
+            result_text = generate_with_retry(
+                model_instance,
+                [extraction_prompt] + pil_images,
+                config_kwargs,
+                seed=seed,
+                max_retries=max_retries,
+                proxy=proxy,
+                logger=logger,
+                label="Carousel composition extraction",
+            )
+        except GeminiGenerationError as e:
+            if on_failure == "stop":
+                raise
+            logger.error(f"{e} – using generic composition")
+            return {
+                "common": "wearing casual clothing",
+                "per_image": ["standing in neutral pose"] * len(pil_images)
+            }
 
-                logger.info(f"Extracted carousel composition (attempt {attempt}):")
-                logger.info(f"  {result_text[:500]}...")
+        logger.info("Extracted carousel composition:")
+        logger.info(f"  {result_text[:500]}...")
 
-                # Parse the response
-                common_section = ""
-                per_image = []
+        # Parse the response
+        common_section = ""
+        per_image = []
 
-                lines = result_text.split('\n')
-                current_section = None
+        lines = result_text.split('\n')
+        current_section = None
+        current_content = []
+
+        for line in lines:
+            line_upper = line.strip().upper()
+            if line_upper.startswith("COMMON ELEMENTS"):
+                current_section = "common"
                 current_content = []
-
-                for line in lines:
-                    line_upper = line.strip().upper()
-                    if line_upper.startswith("COMMON ELEMENTS"):
-                        current_section = "common"
-                        current_content = []
-                    elif line_upper.startswith("IMAGE "):
-                        if current_section == "common":
-                            common_section = '\n'.join(current_content).strip()
-                        elif current_section == "image":
-                            per_image.append('\n'.join(current_content).strip())
-                        current_section = "image"
-                        current_content = []
-                    elif line.strip():
-                        current_content.append(line)
-
-                # Add last section
-                if current_section == "image":
+            elif line_upper.startswith("IMAGE "):
+                if current_section == "common":
+                    common_section = '\n'.join(current_content).strip()
+                elif current_section == "image":
                     per_image.append('\n'.join(current_content).strip())
+                current_section = "image"
+                current_content = []
+            elif line.strip():
+                current_content.append(line)
 
-                if not common_section:
-                    common_section = "wearing a stylish outfit"
-                if not per_image:
-                    per_image = ["standing in a neutral pose"] * len(pil_images)
+        # Add last section
+        if current_section == "image":
+            per_image.append('\n'.join(current_content).strip())
 
-                return {"common": common_section, "per_image": per_image}
+        if not common_section:
+            common_section = "wearing a stylish outfit"
+        if not per_image:
+            per_image = ["standing in a neutral pose"] * len(pil_images)
 
-            except Exception as e:
-                if attempt < max_retries:
-                    logger.warning(f"Carousel composition extraction attempt {attempt} failed: {e}")
-                    logger.info(f"Retrying (attempt {attempt + 1}/{max_retries})...")
-                    time.sleep(0.5)
-                else:
-                    logger.error(f"Carousel composition extraction failed after {max_retries} attempts: {e}", exc_info=True)
-                    return {
-                        "common": "wearing casual clothing",
-                        "per_image": ["standing in neutral pose"] * len(pil_images)
-                    }
+        return {"common": common_section, "per_image": per_image}
 
     def _generate_carousel_character_prompt(
         self,
@@ -393,7 +392,10 @@ class GeminiCarouselCharacterTransferNode:
         eye_highlight: str,
         style_suffix: str,
         model_instance,
-        generation_config,
+        config_kwargs: dict,
+        seed: int | None,
+        max_retries: int,
+        on_failure: str,
         proxy: str | None,
         batch_size: int,
         logger,
@@ -431,33 +433,29 @@ class GeminiCarouselCharacterTransferNode:
             f"Output ONLY the final prompt - no explanations, no metadata, just the prompt text."
         )
 
-        max_retries = 3
-        for attempt in range(1, max_retries + 1):
-            try:
-                with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
-                    response = model_instance.generate_content(
-                        [generation_prompt, pil_image],
-                        generation_config=generation_config
-                    )
-                generated_prompt = response.text.strip()
+        try:
+            generated_prompt = generate_with_retry(
+                model_instance,
+                [generation_prompt, pil_image],
+                config_kwargs,
+                seed=seed,
+                max_retries=max_retries,
+                proxy=proxy,
+                logger=logger,
+                label=f"Image {idx + 1}/{batch_size}",
+            )
+        except GeminiGenerationError as e:
+            if on_failure == "stop":
+                raise
+            fallback_prompt = f"{trigger_word} {common_composition}, {unique_composition}, {signature_features}, {style_suffix}"
+            logger.error(f"{e} – using template fallback prompt for image {idx + 1}")
+            return (idx, fallback_prompt)
 
-                logger.info(f"Image {idx + 1}/{batch_size} (attempt {attempt}):")
-                logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
-                logger.info(f"  First 200 chars: {generated_prompt[:200]}...")
+        logger.info(f"Image {idx + 1}/{batch_size}:")
+        logger.info(f"  Generated prompt length: {len(generated_prompt)} characters")
+        logger.info(f"  First 200 chars: {generated_prompt[:200]}...")
 
-                return (idx, generated_prompt)
-
-            except Exception as e:
-                if attempt < max_retries:
-                    logger.warning(f"Image {idx + 1}/{batch_size} attempt {attempt} failed: {e}")
-                    logger.info(f"Retrying image {idx + 1}/{batch_size} (attempt {attempt + 1}/{max_retries})...")
-                    time.sleep(0.5)
-                else:
-                    logger.error(f"Image {idx + 1}/{batch_size} failed after {max_retries} attempts: {e}", exc_info=True)
-
-        fallback_prompt = f"{trigger_word} {common_composition}, {unique_composition}, {signature_features}, {style_suffix}"
-        logger.warning(f"Using fallback prompt for image {idx + 1}")
-        return (idx, fallback_prompt)
+        return (idx, generated_prompt)
 
     def process_carousel_character_transfer(
         self,
@@ -474,6 +472,9 @@ class GeminiCarouselCharacterTransferNode:
         safety_settings: str = "BLOCK_NONE",
         temperature: float = 0.7,
         num_predict: int = 1024,
+        seed: int | None = None,
+        max_retries: int = 5,
+        on_failure: str = "stop",
     ):
         """
         Process carousel of reference images and transfer to your character with consistency.
@@ -494,13 +495,14 @@ class GeminiCarouselCharacterTransferNode:
             system_instruction=system_instruction if system_instruction else None
         )
 
-        # Configure generation
-        generation_config = genai.GenerationConfig(
+        # Configure generation (seed is added per attempt by generate_with_retry)
+        config_kwargs = dict(
             response_mime_type="text/plain",
             temperature=temperature,
         )
         if num_predict > 0:
-            generation_config.max_output_tokens = num_predict
+            config_kwargs["max_output_tokens"] = num_predict
+        retry_kwargs = dict(seed=seed, max_retries=max_retries, on_failure=on_failure)
 
         # Convert batch tensor to list of PIL images
         pil_images = images_to_pillow(images)
@@ -514,9 +516,10 @@ class GeminiCarouselCharacterTransferNode:
         composition = self._extract_carousel_composition(
             pil_images,
             model_instance,
-            generation_config,
-            proxy,
-            logger,
+            config_kwargs,
+            proxy=proxy,
+            logger=logger,
+            **retry_kwargs,
         )
 
         common_elements = composition["common"]
@@ -546,7 +549,8 @@ class GeminiCarouselCharacterTransferNode:
                     eye_highlight=eye_highlight_template,
                     style_suffix=style_suffix,
                     model_instance=model_instance,
-                    generation_config=generation_config,
+                    config_kwargs=config_kwargs,
+                    **retry_kwargs,
                     proxy=proxy,
                     batch_size=batch_size,
                     logger=logger,
@@ -648,6 +652,7 @@ class GeminiDatasetBatchNode:
                         "detailed captions."
                     ),
                 }),
+                **RETRY_INPUTS,
             },
         }
 
@@ -672,24 +677,26 @@ class GeminiDatasetBatchNode:
         except (IndexError, AttributeError):
             return False
 
-    def _call_once(self, idx, pil_image, model_instance, prompt,
-                   generation_config, proxy, batch_size, logger, min_chars=0):
+    def _call_once(self, idx, pil_image, model_instance, prompt, config_kwargs,
+                   proxy, batch_size, logger, min_chars=0, seed=None,
+                   max_retries=5, on_failure="stop"):
         """
         Single image → single caption.
 
-        Handles two distinct failure modes:
+        Empty responses and API errors are retried with an incrementing seed.
+        On top of that, two soft failure modes are retried but the best
+        result is kept if they never go away:
           1. MAX_TOKENS  – response was literally cut off mid-sentence because
                            num_predict is too low.  Logged clearly so the user
                            knows to raise the value.
           2. Too short   – response finished naturally but is under min_chars.
                            Retried with an explicit length instruction appended.
         """
-        max_retries = 3
-        last_caption = None
+        label = f"[{idx + 1}/{batch_size}]"
 
-        for attempt in range(1, max_retries + 1):
+        def build_contents(last_caption):
             # On length-retry: tell the model it was too short
-            if attempt > 1 and min_chars > 0 and last_caption is not None:
+            if min_chars > 0 and last_caption is not None:
                 active_prompt = (
                     f"{prompt}\n\n"
                     f"IMPORTANT: Your previous response was only "
@@ -699,69 +706,40 @@ class GeminiDatasetBatchNode:
                 )
             else:
                 active_prompt = prompt
+            return [active_prompt, pil_image]
 
-            try:
-                with temporary_env_var("HTTP_PROXY", proxy), \
-                     temporary_env_var("HTTPS_PROXY", proxy):
-                    response = model_instance.generate_content(
-                        [active_prompt, pil_image],
-                        generation_config=generation_config,
-                    )
-
-                caption = response.text.strip()
-
-                # ── Check for MAX_TOKENS truncation ───────────────────────
-                if self._is_max_tokens(response):
-                    logger.warning(
-                        f"[{idx + 1}/{batch_size}] ⚠ MAX_TOKENS hit – "
-                        f"caption cut off at {len(caption)} chars. "
-                        f"Raise num_predict (currently "
-                        f"{generation_config.max_output_tokens or 'default'}) "
-                        f"to fix mid-sentence truncation."
-                    )
-                    last_caption = caption
-                    if attempt < max_retries:
-                        time.sleep(0.5)
-                        continue
-
-                # ── Check minimum length ──────────────────────────────────
-                if min_chars > 0 and len(caption) < min_chars:
-                    last_caption = caption
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"[{idx + 1}/{batch_size}] too short "
-                            f"({len(caption)} < {min_chars} chars) – "
-                            f"retrying (attempt {attempt + 1}/{max_retries})…"
-                        )
-                        time.sleep(0.5)
-                        continue
-                    else:
-                        logger.warning(
-                            f"[{idx + 1}/{batch_size}] still short after "
-                            f"{max_retries} attempts ({len(caption)} chars) – "
-                            f"keeping best result"
-                        )
-
-                logger.info(
-                    f"[{idx + 1}/{batch_size}] OK – {len(caption)} chars  "
-                    f"| {caption[:100]}…"
+        def check(caption, response):
+            if self._is_max_tokens(response):
+                return (
+                    f"⚠ MAX_TOKENS hit – caption cut off at {len(caption)} chars. "
+                    f"Raise num_predict (currently "
+                    f"{config_kwargs.get('max_output_tokens', 'default')}) "
+                    f"to fix mid-sentence truncation."
                 )
-                return caption
+            if min_chars > 0 and len(caption) < min_chars:
+                return f"too short ({len(caption)} < {min_chars} chars)"
+            return None
 
-            except Exception as exc:
-                logger.warning(
-                    f"[{idx + 1}/{batch_size}] attempt {attempt} failed: {exc}"
-                )
-                if attempt < max_retries:
-                    time.sleep(1.0)
-                else:
-                    logger.error(
-                        f"[{idx + 1}/{batch_size}] giving up after "
-                        f"{max_retries} attempts"
-                    )
-                    if last_caption:
-                        return last_caption
-                    return f"Error generating caption for image {idx + 1}"
+        try:
+            caption = generate_with_retry(
+                model_instance,
+                build_contents,
+                config_kwargs,
+                seed=seed,
+                max_retries=max_retries,
+                proxy=proxy,
+                logger=logger,
+                label=label,
+                check=check,
+            )
+        except GeminiGenerationError as exc:
+            if on_failure == "stop":
+                raise
+            logger.error(f"{exc} – using fallback caption")
+            return f"Error generating caption for image {idx + 1}"
+
+        logger.info(f"{label} OK – {len(caption)} chars  | {caption[:100]}…")
+        return caption
 
     # ------------------------------------------------------------------ #
 
@@ -780,6 +758,8 @@ class GeminiDatasetBatchNode:
         seed=None,
         temperature: float = 0.7,
         num_predict: int = 512,
+        max_retries: int = 5,
+        on_failure: str = "stop",
     ):
         logger = logging.getLogger("ComfyUI-Gemini-Dataset-Batch")
 
@@ -795,14 +775,15 @@ class GeminiDatasetBatchNode:
             system_instruction=system_instruction if system_instruction else None,
         )
 
-        generation_config = genai.GenerationConfig(
+        # Seed is added per attempt by generate_with_retry
+        config_kwargs = dict(
             response_mime_type=(
                 "application/json" if response_type == "json" else "text/plain"
             ),
             temperature=temperature,
         )
         if num_predict > 0:
-            generation_config.max_output_tokens = num_predict
+            config_kwargs["max_output_tokens"] = num_predict
 
         pil_images = images_to_pillow(images)
         batch_size  = len(pil_images)
@@ -817,8 +798,9 @@ class GeminiDatasetBatchNode:
         for idx, pil_image in enumerate(pil_images):
             caption = self._call_once(
                 idx, pil_image, model_instance, prompt,
-                generation_config, proxy, batch_size, logger,
-                min_chars=min_chars,
+                config_kwargs, proxy, batch_size, logger,
+                min_chars=min_chars, seed=seed,
+                max_retries=max_retries, on_failure=on_failure,
             )
             captions.append(caption)
 
@@ -871,6 +853,9 @@ class GeminiNode:
                 "seed": ("INT", {"default": seed, "min": 0, "max": 2**31, "step": 1}),
                 "temperature": ("FLOAT", {"default": -0.05, "min": -0.05, "max": 1, "step": 0.05}),
                 "num_predict": ("INT", {"default": 0, "min": 0, "max": 1048576, "step": 1}),
+                # error_fallback_value already acts as on_failure here:
+                # empty = stop the run, any text = use it as fallback
+                "max_retries": RETRY_INPUTS["max_retries"],
             },
         }
 
@@ -901,6 +886,8 @@ class GeminiNode:
         error_fallback_value: str | None = None,
         temperature: float | None = None,
         num_predict: int | None = None,
+        seed: int | None = None,
+        max_retries: int = 5,
         **kwargs,
     ):
         self.text_output = None
@@ -915,17 +902,24 @@ class GeminiNode:
         else:
             genai.configure(api_key=api_key, transport="rest")
         model = genai.GenerativeModel(model, safety_settings=safety_settings, system_instruction=system_instruction)
-        generation_config = genai.GenerationConfig(
+        config_kwargs = dict(
             response_mime_type="application/json" if response_type == "json" else "text/plain"
         )
         if temperature is not None and temperature >= 0:
-            generation_config.temperature = temperature
+            config_kwargs["temperature"] = temperature
         if num_predict is not None and num_predict > 0:
-            generation_config.max_output_tokens = num_predict
+            config_kwargs["max_output_tokens"] = num_predict
         try:
-            with temporary_env_var("HTTP_PROXY", proxy), temporary_env_var("HTTPS_PROXY", proxy):
-                response = model.generate_content([prompt, *images_to_send], generation_config=generation_config)
-            self.text_output = response.text
+            self.text_output = generate_with_retry(
+                model,
+                [prompt, *images_to_send],
+                config_kwargs,
+                seed=seed,
+                max_retries=max_retries,
+                proxy=proxy,
+                logger=logging.getLogger("ComfyUI-Gemini"),
+                label="Ask Gemini",
+            )
         except Exception:
             if error_fallback_value is None:
                 logging.getLogger("ComfyUI-Gemini").debug("ComfyUI-Gemini: exception occurred:", exc_info=True)
