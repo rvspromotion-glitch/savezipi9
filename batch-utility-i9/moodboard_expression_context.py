@@ -24,11 +24,10 @@ Pipeline position:
 
 import logging
 import random
-import time
 
 import google.generativeai as genai
 
-from .utils import images_to_pillow, temporary_env_var
+from .utils import RETRY_INPUTS, GeminiGenerationError, generate_with_retry, images_to_pillow
 
 logger = logging.getLogger("MoodboardExpressionContext")
 
@@ -98,6 +97,7 @@ class MoodboardExpressionContext:
                     "tooltip": "Lower = more faithful to what the images show.",
                 }),
                 "proxy": ("STRING", {"default": ""}),
+                **RETRY_INPUTS,
             },
         }
 
@@ -116,6 +116,8 @@ class MoodboardExpressionContext:
         safety_settings: str = "BLOCK_NONE",
         temperature: float = 0.4,
         proxy: str = "",
+        max_retries: int = 5,
+        on_failure: str = "stop",
     ) -> tuple:
         if isinstance(api_key, list):
             api_key = api_key[0] if api_key else ""
@@ -129,6 +131,10 @@ class MoodboardExpressionContext:
             temperature = temperature[0] if temperature else 0.4
         if isinstance(proxy, list):
             proxy = proxy[0] if proxy else ""
+        if isinstance(max_retries, list):
+            max_retries = max_retries[0] if max_retries else 5
+        if isinstance(on_failure, list):
+            on_failure = on_failure[0] if on_failure else "stop"
 
         api_key = (api_key or "").strip()
         proxy   = (proxy   or "").strip() or None
@@ -148,10 +154,6 @@ class MoodboardExpressionContext:
             temperature=temperature,
             max_output_tokens=1024,
         )
-        try:
-            generation_config = genai.GenerationConfig(**cfg_kwargs, seed=seed)
-        except TypeError:
-            generation_config = genai.GenerationConfig(**cfg_kwargs)
 
         pil_images = images_to_pillow(moodboard_images)
         logger.info(
@@ -159,35 +161,26 @@ class MoodboardExpressionContext:
             f"{len(pil_images)} image(s) via {model} (seed={seed})"
         )
 
-        max_retries = 3
-        last_error  = None
+        try:
+            expression_section = generate_with_retry(
+                model_instance,
+                [_EXPRESSION_PROMPT] + pil_images,
+                cfg_kwargs,
+                seed=seed,
+                max_retries=max_retries,
+                proxy=proxy,
+                logger=logger,
+                label="Expression context",
+            )
+        except GeminiGenerationError as exc:
+            if on_failure == "stop":
+                raise
+            logger.error(f"{exc} – passing the original analysis through unchanged")
+            return (moodboard_analysis,)
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                content = [_EXPRESSION_PROMPT] + pil_images
-                with temporary_env_var("HTTP_PROXY", proxy), \
-                     temporary_env_var("HTTPS_PROXY", proxy):
-                    response = model_instance.generate_content(
-                        content,
-                        generation_config=generation_config,
-                    )
-                expression_section = response.text.strip()
-                enriched = moodboard_analysis.strip() + "\n\n" + expression_section
-                logger.info(
-                    f"✓ Expression direction appended: {len(expression_section)} chars "
-                    f"(attempt {attempt})"
-                )
-                return (enriched,)
-
-            except Exception as exc:
-                last_error = exc
-                logger.warning(f"Attempt {attempt}/{max_retries} failed: {exc}")
-                if attempt < max_retries:
-                    time.sleep(1.5)
-
-        logger.error(f"All {max_retries} attempts failed: {last_error}", exc_info=True)
-        # Return the original analysis unchanged rather than crashing the workflow
-        return (moodboard_analysis,)
+        enriched = moodboard_analysis.strip() + "\n\n" + expression_section
+        logger.info(f"✓ Expression direction appended: {len(expression_section)} chars")
+        return (enriched,)
 
 
 # ---------------------------------------------------------------------------
