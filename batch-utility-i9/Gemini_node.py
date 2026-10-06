@@ -7,12 +7,19 @@ import time
 import google.generativeai as genai
 from torch import Tensor
 
+from . import openrouter
+from .openrouter import OPENROUTER_INPUTS, OpenRouterError
 from .utils import RETRY_INPUTS, GeminiGenerationError, generate_with_retry, images_to_pillow
 
 class GeminiBatchNode:
     """
     Processes a batch of images through Gemini, generating one prompt per image.
     Output is a list of prompts matching the batch size.
+
+    With provider=openrouter the images go to openrouter_model through
+    OpenRouter instead, and after refusals_before_fallback refusals or failures
+    to fallback_model. With provider=gemini and an OpenRouter key, Gemini gets
+    refusals_before_fallback tries and fallback_model takes over after that.
     """
     
     @classmethod
@@ -51,6 +58,7 @@ class GeminiBatchNode:
                 "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "num_predict": ("INT", {"default": 512, "min": 0, "max": 1048576, "step": 1}),
                 **RETRY_INPUTS,
+                **OPENROUTER_INPUTS,
             },
         }
 
@@ -74,25 +82,51 @@ class GeminiBatchNode:
         proxy: str | None,
         batch_size: int,
         logger,
+        route: dict | None = None,
     ):
         """
         Process a single image synchronously (runs in thread pool for concurrency).
         Retries with an incrementing seed; raises or falls back once retries run out.
 
+        route: the OpenRouter models to use — {"key", "first", "models",
+            "messages_kwargs", "chat_kwargs"}. "first" is True when Gemini is
+            skipped; otherwise the models are the fallback after Gemini fails.
+
         Returns:
             tuple: (index, generated_prompt) to preserve ordering
         """
+        label = f"Image {idx + 1}/{batch_size}"
         try:
-            generated_prompt = generate_with_retry(
-                model_instance,
-                [prompt, pil_image],
-                config_kwargs,
-                seed=seed,
-                max_retries=max_retries,
-                proxy=proxy,
-                logger=logger,
-                label=f"Image {idx + 1}/{batch_size}",
-            )
+            generated_prompt = None
+            if not (route and route["first"]):
+                try:
+                    generated_prompt = generate_with_retry(
+                        model_instance,
+                        [prompt, pil_image],
+                        config_kwargs,
+                        seed=seed,
+                        max_retries=route["gemini_tries"] if route else max_retries,
+                        proxy=proxy,
+                        logger=logger,
+                        label=label,
+                    )
+                except GeminiGenerationError as e:
+                    if not route:
+                        raise
+                    logger.warning(f"{e} – asking {route['models'][0][0]} instead")
+            if generated_prompt is None:
+                try:
+                    generated_prompt = openrouter.chat_with_fallback(
+                        route["key"],
+                        route["models"],
+                        openrouter.build_messages(prompt, [pil_image], **route["messages_kwargs"]),
+                        seed=seed,
+                        logger=logger,
+                        label=label,
+                        **route["chat_kwargs"],
+                    )
+                except OpenRouterError as e:
+                    raise GeminiGenerationError(str(e)) from e
         except GeminiGenerationError as e:
             if on_failure == "stop":
                 raise
@@ -124,23 +158,36 @@ class GeminiBatchNode:
         num_predict: int = 512,
         max_retries: int = 5,
         on_failure: str = "stop",
+        provider: str = "gemini",
+        openrouter_api_key: str = "",
+        openrouter_model: str = openrouter.DEFAULT_MODEL,
+        fallback_model: str = openrouter.DEFAULT_FALLBACK_MODEL,
+        refusals_before_fallback: int = 2,
     ):
         """Process each image in batch and return list of prompts."""
 
         logger = logging.getLogger("ComfyUI-Gemini-Batch")
 
-        # Configure API
-        if "GOOGLE_API_KEY" in os.environ and not api_key:
-            genai.configure(transport="rest")
-        else:
-            genai.configure(api_key=api_key, transport="rest")
-
-        # Initialize model
-        model_instance = genai.GenerativeModel(
-            model,
-            safety_settings=safety_settings,
-            system_instruction=system_instruction if system_instruction else None
+        route = self._openrouter_route(
+            provider, openrouter_api_key, openrouter_model, fallback_model,
+            refusals_before_fallback, max_retries, system_instruction,
+            response_type, temperature, num_predict, proxy,
         )
+
+        model_instance = None
+        if not (route and route["first"]):
+            # Configure API
+            if "GOOGLE_API_KEY" in os.environ and not api_key:
+                genai.configure(transport="rest")
+            else:
+                genai.configure(api_key=api_key, transport="rest")
+
+            # Initialize model
+            model_instance = genai.GenerativeModel(
+                model,
+                safety_settings=safety_settings,
+                system_instruction=system_instruction if system_instruction else None
+            )
 
         # Configure generation (seed is added per attempt by generate_with_retry)
         config_kwargs = dict(
@@ -176,6 +223,7 @@ class GeminiBatchNode:
                     proxy=proxy,
                     batch_size=batch_size,
                     logger=logger,
+                    route=route,
                 )
                 futures.append(future)
 
@@ -194,6 +242,38 @@ class GeminiBatchNode:
         logger.info(f"Successfully generated {len(prompts)} prompts")
         logger.info(f"Prompt lengths: {[len(p) for p in prompts]}")
         return (prompts,)
+
+    @staticmethod
+    def _openrouter_route(
+        provider, api_key, first_model, fallback_model, refusals_before_fallback,
+        max_retries, system_instruction, response_type, temperature, num_predict, proxy,
+    ):
+        """Which OpenRouter models to ask, or None for Gemini only (the old behaviour)."""
+        key = openrouter.resolve_key(api_key)
+        fallback = (fallback_model or "").strip()
+        tries_first = max(1, int(refusals_before_fallback))
+        common = dict(
+            key=key,
+            messages_kwargs=dict(system_instruction=system_instruction or None),
+            chat_kwargs=dict(
+                temperature=temperature,
+                max_tokens=num_predict if num_predict > 0 else None,
+                json_mode=response_type == "json",
+                proxy=proxy or None,
+            ),
+        )
+        if provider == "openrouter":
+            if not key:
+                raise ValueError("provider=openrouter needs openrouter_api_key or OPENROUTER_API_KEY")
+            first = (first_model or "").strip() or openrouter.DEFAULT_MODEL
+            if fallback and fallback != first:
+                models = [(first, tries_first), (fallback, max_retries)]
+            else:
+                models = [(first, max_retries)]
+            return dict(common, first=True, models=models)
+        if key and fallback:
+            return dict(common, first=False, gemini_tries=tries_first, models=[(fallback, max_retries)])
+        return None
 
 
 class GeminiCarouselCharacterTransferNode:
